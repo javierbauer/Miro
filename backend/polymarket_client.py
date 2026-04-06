@@ -119,23 +119,57 @@ class PolymarketClient:
     # ------------------------------------------------------------------ #
     async def enrich_market(self, market: dict) -> dict:
         """Add live CLOB prices to a Gamma market dict."""
-        tokens = market.get("tokens", []) or market.get("clobTokenIds", [])
-        yes_price = market.get("outcomePrices", [None])[0]
-        no_price  = market.get("outcomePrices", [None, None])[1]
+        import json as _json
 
-        # Try to get fresher CLOB price for YES token
+        yes_price = None
+        no_price  = None
+
+        # outcomePrices may be a JSON-encoded string OR a real list
+        raw = market.get("outcomePrices")
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                raw = None
+        if isinstance(raw, list) and len(raw) >= 2:
+            try:
+                yes_price = float(raw[0])
+                no_price  = float(raw[1])
+            except Exception:
+                pass
+
+        # Fall back: bestBid / bestAsk / lastTradePrice
+        if yes_price is None:
+            for key in ("bestBid", "lastTradePrice", "price"):
+                v = market.get(key)
+                if v is not None:
+                    try:
+                        yes_price = float(v)
+                        break
+                    except Exception:
+                        pass
+
+        # Try live CLOB price for YES token
+        tokens = market.get("tokens") or []
+        if isinstance(tokens, str):
+            try:
+                tokens = _json.loads(tokens)
+            except Exception:
+                tokens = []
+
         if tokens:
-            yes_token = tokens[0] if isinstance(tokens[0], str) else tokens[0].get("token_id")
+            t0 = tokens[0]
+            yes_token = t0 if isinstance(t0, str) else t0.get("token_id")
             if yes_token:
                 live = await self.get_price(yes_token, "buy")
-                if live:
+                if live and 0.01 < live < 0.99:
                     yes_price = live
 
-        try:
-            yes_price = float(yes_price) if yes_price else 0.5
-            no_price  = float(no_price)  if no_price  else round(1 - yes_price, 4)
-        except Exception:
-            yes_price, no_price = 0.5, 0.5
+        # Final fallback
+        if not yes_price or not (0.01 < yes_price < 0.99):
+            yes_price = 0.5
+        if not no_price or not (0.01 < no_price < 0.99):
+            no_price = round(1 - yes_price, 4)
 
         market["_yes_price"] = yes_price
         market["_no_price"]  = no_price
