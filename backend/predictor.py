@@ -41,12 +41,14 @@ class Predictor:
     """
 
     # --- tunable knobs ---------------------------------------------------
-    MIN_LIQUIDITY   = 500.0     # ignore thin markets
-    MIN_VOLUME_24H  = 100.0     # ignore stale markets
-    MAX_VOLUME_24H  = 5_000_000 # too efficient above this
-    MIN_EDGE        = 0.04      # 4 cent edge minimum
-    MIN_CONFIDENCE  = 0.55      # confidence gate
-    MAX_KELLY_FRAC  = 0.05      # cap bet size at 5% of bankroll
+    MIN_LIQUIDITY       = 500.0       # ignore thin markets
+    MIN_VOLUME_24H      = 100.0       # ignore stale markets
+    MAX_VOLUME_24H      = 5_000_000   # too efficient above this
+    MIN_EDGE            = 0.04        # 4 cent edge minimum
+    MIN_CONFIDENCE      = 0.55        # confidence gate
+    MAX_KELLY_FRAC      = 0.05        # cap bet size at 5% of bankroll
+    MAX_DAYS_TO_CLOSE   = 7           # only trade markets resolving within 7 days
+    PREFER_SHORT_TERM   = True        # boost confidence for short-term markets
 
     def predict(self, market: dict) -> Optional[PredictionResult]:
         condition_id = market.get("conditionId") or market.get("condition_id", "")
@@ -65,6 +67,13 @@ class Predictor:
             return None   # too efficient
         if yes_price <= 0.05 or yes_price >= 0.95:
             return None   # too extreme / near-resolved — skip
+
+        # ── short-term filter: skip markets that resolve too far out ───
+        days_left = self._days_to_close(market)
+        if days_left is not None and days_left > self.MAX_DAYS_TO_CLOSE:
+            return None
+        if days_left is not None and days_left < 0.1:
+            return None   # resolving in < 2.4 hours — too late to trade
 
         # ── signals ────────────────────────────────────────────────────
         spread_signal   = self._spread_signal(yes_price, no_price)
@@ -92,8 +101,8 @@ class Predictor:
         bet_price = yes_price if bet_side == "YES" else no_price
         bet_prob  = pred_yes  if bet_side == "YES" else (1 - pred_yes)
 
-        # Confidence: combination of edge magnitude + liquidity depth
-        confidence = self._confidence(best_edge, liquidity, volume_24h)
+        # Confidence: edge + liquidity + recency bonus for short-term markets
+        confidence = self._confidence(best_edge, liquidity, volume_24h, days_left)
 
         if best_edge < self.MIN_EDGE or confidence < self.MIN_CONFIDENCE:
             signal = "SKIP"
@@ -102,11 +111,12 @@ class Predictor:
 
         kelly = self._kelly(bet_prob, bet_price)
 
+        days_str = f"{days_left:.1f}d" if days_left is not None else "unknown"
         reasoning = (
             f"spread_signal={spread_signal:.3f} vol_signal={volume_signal:.3f} "
             f"recency={recency_signal:.3f} momentum={momentum_signal:.3f} | "
             f"pred_yes={pred_yes:.3f} market_yes={yes_price:.3f} "
-            f"edge={best_edge:+.3f} conf={confidence:.2f}"
+            f"edge={best_edge:+.3f} conf={confidence:.2f} closes_in={days_str}"
         )
 
         return PredictionResult(
@@ -177,15 +187,37 @@ class Predictor:
             return max(0.01, min(0.99, yes + nudge))
         return yes
 
-    def _confidence(self, edge: float, liquidity: float, volume: float) -> float:
+    def _days_to_close(self, market: dict) -> Optional[float]:
+        """Return days until market closes, or None if unknown."""
+        end_str = market.get("endDate") or market.get("end_date_iso")
+        if not end_str:
+            return None
+        try:
+            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            return (end - datetime.now(timezone.utc)).total_seconds() / 86400
+        except Exception:
+            return None
+
+    def _confidence(self, edge: float, liquidity: float, volume: float,
+                    days_left: Optional[float] = None) -> float:
         """
-        Confidence = f(edge magnitude, liquidity depth, volume).
-        More liquidity + higher edge → higher confidence.
+        Confidence = f(edge magnitude, liquidity depth, volume, time to close).
+        Short-term markets get a bonus — faster feedback = more reliable signal.
         """
         edge_score = min(1.0, edge / 0.15)
-        liq_score  = min(1.0, math.log10(max(liquidity, 10)) / 5)   # log scale
-        vol_score  = max(0.0, 1.0 - volume / self.MAX_VOLUME_24H)     # lower vol = less efficient
-        return round(0.4 * edge_score + 0.35 * liq_score + 0.25 * vol_score, 3)
+        liq_score  = min(1.0, math.log10(max(liquidity, 10)) / 5)
+        vol_score  = max(0.0, 1.0 - volume / self.MAX_VOLUME_24H)
+
+        # Recency bonus: markets closing within 1 day get +0.1, within 3 days +0.05
+        recency_bonus = 0.0
+        if days_left is not None:
+            if days_left <= 1:
+                recency_bonus = 0.10
+            elif days_left <= 3:
+                recency_bonus = 0.05
+
+        base = 0.4 * edge_score + 0.35 * liq_score + 0.25 * vol_score
+        return round(min(1.0, base + recency_bonus), 3)
 
     def _kelly(self, prob: float, price: float) -> float:
         """
