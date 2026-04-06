@@ -27,6 +27,7 @@ class MarketScanner:
         self.predictor = Predictor()
         self.trader    = Trader()
         self._running  = False
+        self._scanning = False
         self._scan_count = 0
 
     # ------------------------------------------------------------------ #
@@ -34,6 +35,10 @@ class MarketScanner:
     # ------------------------------------------------------------------ #
     async def run_scan(self) -> dict:
         """Execute one full scan cycle. Returns summary stats."""
+        if self._scanning:
+            logger.warning("Scan already in progress — skipping")
+            return {}
+        self._scanning = True
         self._scan_count += 1
         started = datetime.utcnow()
         logger.info(f"=== Scan #{self._scan_count} started [{self.trader.mode_label}] ===")
@@ -64,7 +69,9 @@ class MarketScanner:
 
             except Exception as exc:
                 logger.error(f"Scan error: {exc}", exc_info=True)
+                self._scanning = False
 
+        self._scanning = False
         duration = (datetime.utcnow() - started).total_seconds()
         stats["duration_seconds"] = round(duration, 1)
         logger.info(

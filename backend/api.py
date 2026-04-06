@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Depends, BackgroundTasks, Query
+from datetime import timedelta
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,7 +55,8 @@ async def dashboard():
 #  API endpoints                                                       #
 # ------------------------------------------------------------------ #
 @app.get("/api/status")
-async def get_status():
+async def get_status(session: AsyncSession = Depends(get_session)):
+    balance = await scanner.trader.paper_balance(session) if settings.dry_run else None
     return {
         "mode": scanner.trader.mode_label,
         "dry_run": settings.dry_run,
@@ -64,14 +66,16 @@ async def get_status():
         "min_edge": settings.min_edge,
         "min_confidence": settings.min_confidence,
         "max_daily_spend": settings.max_daily_spend,
-        "paper_balance": scanner.trader._paper_balance,
+        "paper_balance": balance,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
 
 @app.post("/api/scan")
 async def trigger_scan(background_tasks: BackgroundTasks):
-    """Manually trigger a market scan."""
+    """Manually trigger a market scan (ignored if one is already running)."""
+    if scanner._scanning:
+        return {"status": "already_scanning", "message": "Scan already in progress"}
     background_tasks.add_task(scanner.run_scan)
     return {"status": "scan_started", "message": "Scan triggered in background"}
 
@@ -181,11 +185,11 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
     total_spent = await session.execute(
         select(func.coalesce(func.sum(Trade.amount_usdc), 0))
     )
-    # Predictions today
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Predictions in last scan window (last 30 min to avoid accumulation confusion)
+    window_start = datetime.utcnow() - timedelta(minutes=30)
     preds_today = await session.execute(
         select(func.count(Prediction.id)).where(
-            Prediction.created_at >= today_start
+            Prediction.created_at >= window_start
         )
     )
     # Buy signals

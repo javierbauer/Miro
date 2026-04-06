@@ -20,11 +20,23 @@ from backend.database import Trade, DailyStats
 from backend.predictor import PredictionResult
 
 
+PAPER_STARTING_BALANCE = 1000.0
+
+
 class Trader:
     def __init__(self, dry_run: Optional[bool] = None):
         self.dry_run = dry_run if dry_run is not None else settings.dry_run
         self._daily_spent = 0.0
-        self._paper_balance = 1000.0   # virtual USDC for paper trading
+
+    async def paper_balance(self, session: AsyncSession) -> float:
+        """Calculate balance from trade history so it persists across restarts."""
+        result = await session.execute(
+            select(func.coalesce(func.sum(Trade.amount_usdc), 0)).where(
+                Trade.status == "DRY_RUN"
+            )
+        )
+        spent = float(result.scalar())
+        return round(PAPER_STARTING_BALANCE - spent, 2)
 
     # ------------------------------------------------------------------ #
     #  Public interface                                                    #
@@ -46,7 +58,7 @@ class Trader:
             return None
 
         # Size the bet via Kelly
-        bankroll = self._paper_balance if self.dry_run else settings.max_daily_spend
+        bankroll = (await self.paper_balance(session)) if self.dry_run else settings.max_daily_spend
         raw_size = bankroll * prediction.kelly_fraction
         size = min(raw_size, settings.max_bet_usdc, remaining)
         size = round(max(size, 1.0), 2)   # minimum $1 bet
@@ -72,7 +84,6 @@ class Trader:
         size: float,
         session: AsyncSession,
     ) -> Trade:
-        self._paper_balance -= size
         order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
 
         trade = Trade(
