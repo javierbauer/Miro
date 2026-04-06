@@ -3,8 +3,9 @@ uvicorn[standard]
 httpx
 aiohttp
 python-dotenv
-sqlalchemy
+sqlalchemy[asyncio]
 aiosqlite
+greenlet
 apscheduler
 loguru
 jinja2
