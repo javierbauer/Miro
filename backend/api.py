@@ -201,14 +201,17 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
         )
     )
 
-    total_p = buy_signals.scalar() or 1
-    wins    = win_preds.scalar() or 0
+    n_trades     = total_trades.scalar() or 0
+    n_spent      = float(total_spent.scalar() or 0)
+    n_preds      = preds_today.scalar() or 0
+    n_signals    = buy_signals.scalar() or 0
+    n_wins       = win_preds.scalar() or 0
 
     return {
-        "total_trades": total_trades.scalar(),
-        "total_spent_usdc": round(float(total_spent.scalar()), 2),
-        "predictions_today": preds_today.scalar(),
-        "buy_signals_total": buy_signals.scalar(),
-        "estimated_win_rate": round(wins / total_p * 100, 1),
+        "total_trades": n_trades,
+        "total_spent_usdc": round(n_spent, 2),
+        "predictions_today": n_preds,
+        "buy_signals_total": n_signals,
+        "estimated_win_rate": round(n_wins / max(n_signals, 1) * 100, 1),
         "mode": scanner.trader.mode_label,
     }
