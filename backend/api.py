@@ -9,7 +9,7 @@ from fastapi import FastAPI, Depends, BackgroundTasks, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, and_
 from loguru import logger
 import os
 
@@ -182,10 +182,10 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
         select(func.coalesce(func.sum(Trade.amount_usdc), 0))
     )
     # Predictions today
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     preds_today = await session.execute(
         select(func.count(Prediction.id)).where(
-            Prediction.created_at >= today
+            Prediction.created_at >= today_start
         )
     )
     # Buy signals
@@ -197,7 +197,7 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
     # Win rate (predictions where edge > 0 and signal != SKIP)
     win_preds = await session.execute(
         select(func.count(Prediction.id)).where(
-            Prediction.edge > 0, Prediction.signal != "SKIP"
+            and_(Prediction.edge > 0, Prediction.signal != "SKIP")
         )
     )
 
