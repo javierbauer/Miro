@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import FastAPI, Depends, BackgroundTasks, Query
-from datetime import timedelta
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -185,12 +184,9 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
     total_spent = await session.execute(
         select(func.coalesce(func.sum(Trade.amount_usdc), 0))
     )
-    # Predictions in last scan window (last 30 min to avoid accumulation confusion)
-    window_start = datetime.utcnow() - timedelta(minutes=30)
+    # Total unique markets with predictions (one row per market after upsert)
     preds_today = await session.execute(
-        select(func.count(Prediction.id)).where(
-            Prediction.created_at >= window_start
-        )
+        select(func.count(Prediction.id))
     )
     # Buy signals
     buy_signals = await session.execute(

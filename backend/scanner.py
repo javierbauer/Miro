@@ -107,7 +107,11 @@ class MarketScanner:
 
         stats["predictions_made"] += 1
 
-        # Persist prediction
+        # Overwrite the existing prediction for this market (no accumulation)
+        from sqlalchemy import delete
+        await session.execute(
+            delete(Prediction).where(Prediction.condition_id == pred.condition_id)
+        )
         db_pred = Prediction(
             condition_id=pred.condition_id,
             question=pred.question[:200],
