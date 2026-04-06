@@ -63,8 +63,8 @@ class Predictor:
             return None
         if volume_24h > self.MAX_VOLUME_24H:
             return None   # too efficient
-        if yes_price <= 0.01 or yes_price >= 0.99:
-            return None   # already resolved / too extreme
+        if yes_price <= 0.05 or yes_price >= 0.95:
+            return None   # too extreme / near-resolved — skip
 
         # ── signals ────────────────────────────────────────────────────
         spread_signal   = self._spread_signal(yes_price, no_price)

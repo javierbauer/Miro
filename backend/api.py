@@ -9,7 +9,7 @@ from fastapi import FastAPI, Depends, BackgroundTasks, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func, and_
+from sqlalchemy import select, desc, func
 from loguru import logger
 import os
 
@@ -194,24 +194,22 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
             Prediction.signal != "SKIP"
         )
     )
-    # Win rate (predictions where edge > 0 and signal != SKIP)
-    win_preds = await session.execute(
-        select(func.count(Prediction.id)).where(
-            and_(Prediction.edge > 0, Prediction.signal != "SKIP")
-        )
+    # Average edge across actionable buy signals
+    avg_edge_result = await session.execute(
+        select(func.avg(Prediction.edge)).where(Prediction.signal != "SKIP")
     )
 
-    n_trades     = total_trades.scalar() or 0
-    n_spent      = float(total_spent.scalar() or 0)
-    n_preds      = preds_today.scalar() or 0
-    n_signals    = buy_signals.scalar() or 0
-    n_wins       = win_preds.scalar() or 0
+    n_trades  = total_trades.scalar() or 0
+    n_spent   = float(total_spent.scalar() or 0)
+    n_preds   = preds_today.scalar() or 0
+    n_signals = buy_signals.scalar() or 0
+    avg_edge  = float(avg_edge_result.scalar() or 0)
 
     return {
         "total_trades": n_trades,
         "total_spent_usdc": round(n_spent, 2),
         "predictions_today": n_preds,
         "buy_signals_total": n_signals,
-        "estimated_win_rate": round(n_wins / max(n_signals, 1) * 100, 1),
+        "avg_edge_pct": round(avg_edge * 100, 1),
         "mode": scanner.trader.mode_label,
     }

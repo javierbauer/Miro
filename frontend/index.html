@@ -245,7 +245,7 @@
     </div>
     <div class="stat-card">
       <div class="value" id="s-winrate" style="color:var(--purple)">–</div>
-      <div class="label">Est. Win Rate</div>
+      <div class="label">Avg Edge</div>
     </div>
     <div class="stat-card">
       <div class="value" id="s-balance" style="color:var(--yellow)">–</div>
@@ -399,7 +399,7 @@ async function loadStats() {
   document.getElementById('s-spent').textContent   = `$${s.total_spent_usdc}`;
   document.getElementById('s-preds').textContent   = s.predictions_today;
   document.getElementById('s-signals').textContent = s.buy_signals_total;
-  document.getElementById('s-winrate').textContent = s.estimated_win_rate + '%';
+  document.getElementById('s-winrate').textContent = (s.avg_edge_pct >= 0 ? '+' : '') + s.avg_edge_pct + '%';
 }
 
 async function loadPredictions() {
