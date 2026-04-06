@@ -81,15 +81,21 @@ class Predictor:
         edge_yes = pred_yes - yes_price
         edge_no  = (1 - pred_yes) - no_price
 
-        best_edge = edge_yes if abs(edge_yes) >= abs(edge_no) else edge_no
-        bet_side  = "YES" if edge_yes >= edge_no else "NO"
+        # Only trade the side with a POSITIVE edge
+        if edge_yes >= edge_no and edge_yes > 0:
+            bet_side, best_edge = "YES", edge_yes
+        elif edge_no > edge_yes and edge_no > 0:
+            bet_side, best_edge = "NO", edge_no
+        else:
+            bet_side, best_edge = "YES", max(edge_yes, edge_no)  # both ≤ 0 → will SKIP
+
         bet_price = yes_price if bet_side == "YES" else no_price
         bet_prob  = pred_yes  if bet_side == "YES" else (1 - pred_yes)
 
         # Confidence: combination of edge magnitude + liquidity depth
-        confidence = self._confidence(abs(best_edge), liquidity, volume_24h)
+        confidence = self._confidence(best_edge, liquidity, volume_24h)
 
-        if abs(best_edge) < self.MIN_EDGE or confidence < self.MIN_CONFIDENCE:
+        if best_edge < self.MIN_EDGE or confidence < self.MIN_CONFIDENCE:
             signal = "SKIP"
         else:
             signal = f"BUY_{bet_side}"
