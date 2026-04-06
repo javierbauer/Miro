@@ -1,0 +1,15 @@
+[Unit]
+Description=Polymarket Bot 8001
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Miro2
+Environment="PORT=8001"
+ExecStart=/root/Miro2/venv/bin/python main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
