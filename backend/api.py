@@ -248,6 +248,10 @@ async def debug_pnl(session: AsyncSession = Depends(get_session)):
                 "query_closed": items2[0].get("closed") if items2 else None,
             })
     return debug
+
+
+@app.get("/api/pnl")
+async def get_pnl():
     """Return P&L summary from already-resolved trades."""
     return await pnl_tracker.get_summary()
 
