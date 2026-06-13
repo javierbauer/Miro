@@ -20,7 +20,7 @@ from backend.database import Trade, DailyStats
 from backend.predictor import PredictionResult
 
 
-PAPER_STARTING_BALANCE = 1000.0
+PAPER_STARTING_BALANCE = 10_000.0   # raised to $10k so balance stays positive longer
 
 
 class Trader:

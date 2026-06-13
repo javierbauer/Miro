@@ -17,6 +17,9 @@ from backend.config import settings
 from backend.database import init_db, get_session, Market, Prediction, Trade, DailyStats
 from backend.scanner import MarketScanner
 from backend.trader import Trader
+from backend.pnl_tracker import PnLTracker
+
+pnl_tracker = PnLTracker()
 
 app = FastAPI(title="Polymarket Predictor", version="1.0.0")
 
@@ -213,3 +216,16 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
         "avg_edge_pct": round(avg_edge * 100, 1),
         "mode": scanner.trader.mode_label,
     }
+
+
+@app.get("/api/pnl")
+async def get_pnl():
+    """Return P&L summary from already-resolved trades."""
+    return await pnl_tracker.get_summary()
+
+
+@app.post("/api/pnl/update")
+async def update_pnl(background_tasks: BackgroundTasks):
+    """Check Polymarket for resolved markets and update trade P&L."""
+    background_tasks.add_task(pnl_tracker.update_all)
+    return {"status": "pnl_update_started"}
