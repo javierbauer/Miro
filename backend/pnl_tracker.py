@@ -201,11 +201,11 @@ class PnLTracker:
         except Exception:
             pass
 
-        # Strategy 2: query param conditionIds
+        # Strategy 2: query param conditionId (singular — plural is ignored by API)
         try:
             r = await client.get(
                 "https://gamma-api.polymarket.com/markets",
-                params={"conditionIds": condition_id, "limit": 1}
+                params={"conditionId": condition_id, "limit": 1}
             )
             if r.status_code == 200:
                 data = r.json()

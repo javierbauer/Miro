@@ -231,7 +231,7 @@ async def debug_pnl(session: AsyncSession = Depends(get_session)):
     async with httpx.AsyncClient(timeout=10) as client:
         for t in trades:
             r = await client.get("https://gamma-api.polymarket.com/markets",
-                                  params={"conditionIds": t.condition_id, "limit": 1})
+                                  params={"conditionId": t.condition_id, "limit": 1})
             items = r.json() if r.status_code == 200 else []
             if isinstance(items, dict):
                 items = items.get("markets", [])
