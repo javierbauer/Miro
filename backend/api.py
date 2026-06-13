@@ -220,34 +220,32 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
 
 @app.get("/api/pnl/debug")
 async def debug_pnl(session: AsyncSession = Depends(get_session)):
-    """Show sample condition_ids from DB and check them against Gamma API."""
+    """Show resolution status of recent trades."""
     import httpx
+    # Get a mix of trades — try to find sports/short-term ones
     result = await session.execute(
-        select(Trade).where(Trade.status == "DRY_RUN").limit(5)
+        select(Trade).where(Trade.status == "DRY_RUN").order_by(Trade.created_at).limit(20)
     )
     trades = result.scalars().all()
     debug = []
     async with httpx.AsyncClient(timeout=10) as client:
         for t in trades:
-            # Try direct lookup
-            r1 = await client.get(f"https://gamma-api.polymarket.com/markets/{t.condition_id}")
-            # Try conditionIds param
-            r2 = await client.get("https://gamma-api.polymarket.com/markets",
-                                   params={"conditionIds": t.condition_id, "limit": 1})
-            d1 = r1.json() if r1.status_code == 200 else f"HTTP {r1.status_code}"
-            d2 = r2.json() if r2.status_code == 200 else f"HTTP {r2.status_code}"
-            items2 = d2 if isinstance(d2, list) else (d2.get("markets", []) if isinstance(d2, dict) else [])
+            r = await client.get("https://gamma-api.polymarket.com/markets",
+                                  params={"conditionIds": t.condition_id, "limit": 1})
+            items = r.json() if r.status_code == 200 else []
+            if isinstance(items, dict):
+                items = items.get("markets", [])
+            m = items[0] if items else {}
             debug.append({
-                "condition_id": t.condition_id[:30] + "...",
-                "question": t.question[:50],
+                "question": t.question[:60],
                 "side": t.side,
-                "path_lookup_status": r1.status_code,
-                "path_lookup_has_data": bool(d1) and d1 != f"HTTP {r1.status_code}",
-                "query_lookup_found": len(items2) > 0,
-                "query_outcome_prices": items2[0].get("outcomePrices") if items2 else None,
-                "query_closed": items2[0].get("closed") if items2 else None,
+                "price": t.price,
+                "closed": m.get("closed"),
+                "outcomePrices": m.get("outcomePrices"),
             })
-    return debug
+    # Count how many are actually closed
+    closed_count = sum(1 for d in debug if d["closed"])
+    return {"closed_count": closed_count, "total_checked": len(debug), "trades": debug}
 
 
 @app.get("/api/pnl")
