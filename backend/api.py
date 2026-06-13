@@ -33,8 +33,11 @@ _scanner_task: Optional[asyncio.Task] = None
 # ------------------------------------------------------------------ #
 @app.on_event("startup")
 async def startup():
+    global _scanner_task
     await init_db()
     logger.info(f"DB initialized | Mode: {scanner.trader.mode_label}")
+    _scanner_task = asyncio.create_task(scanner.start_loop(900))
+    logger.info("Scanner loop auto-started (interval=900s)")
 
 
 @app.on_event("shutdown")
