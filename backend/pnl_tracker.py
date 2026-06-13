@@ -139,15 +139,15 @@ class PnLTracker:
 
     def _parse_winner_clob(self, market: dict):
         """
-        Returns True if YES won, False if NO won, None if unresolved.
-        Reads tokens[].winner from CLOB API response.
+        Returns True if YES (token[0]) won, False if NO (token[1]) won, None if unresolved.
+        Uses token index rather than outcome name so it works for both binary
+        (Yes/No) and named-outcome (team names) markets.
+        token[0] always corresponds to the YES position (outcomePrices[0] in Gamma).
         """
         tokens = market.get("tokens", [])
-        for token in tokens:
-            if not isinstance(token, dict):
-                continue
-            if token.get("winner") is True:
-                return token.get("outcome", "").upper() == "YES"
+        for i, token in enumerate(tokens):
+            if isinstance(token, dict) and token.get("winner") is True:
+                return i == 0  # token[0] = YES, token[1] = NO
         return None
 
     def _calc_pnl_clob(self, trade: Trade, market):
