@@ -103,7 +103,7 @@ class PnLTracker:
             }
 
     async def _fetch_resolved_markets(self) -> dict:
-        """Bulk fetch resolved markets from Gamma API. Returns dict keyed by conditionId."""
+        """Bulk fetch closed markets from Gamma API since April 2026."""
         client = await self.client._get()
         result = {}
         offset = 0
@@ -111,7 +111,13 @@ class PnLTracker:
             try:
                 r = await client.get(
                     "https://gamma-api.polymarket.com/markets",
-                    params={"closed": "true", "resolved": "true", "limit": 100, "offset": offset}
+                    params={
+                        "closed": "true",
+                        "limit": 100,
+                        "offset": offset,
+                        "order": "closedTime",
+                        "ascending": "false",
+                    }
                 )
                 if r.status_code != 200:
                     break
@@ -119,32 +125,60 @@ class PnLTracker:
                 items = data if isinstance(data, list) else data.get("markets", [])
                 if not items:
                     break
+
+                stop = False
                 for m in items:
+                    # Only care about markets closed after we started trading
+                    closed_time = m.get("closedTime") or m.get("endDate") or ""
+                    if closed_time and closed_time < "2026-04-01":
+                        stop = True
+                        break
                     cid = m.get("conditionId") or m.get("condition_id")
-                    if cid:
+                    if cid and self._parse_winner(m) is not None:
                         result[cid] = m
-                if len(items) < 100:
+
+                if stop or len(items) < 100:
                     break
                 offset += 100
                 await asyncio.sleep(0.3)
             except Exception as e:
-                logger.error(f"Bulk fetch error: {e}")
+                logger.error(f"Bulk fetch error at offset {offset}: {e}")
                 break
         return result
+
+    def _parse_winner(self, market: dict):
+        """
+        Returns True if YES won, False if NO won, None if unresolved/cancelled.
+        Determined by outcomePrices: ["1","0"] = YES, ["0","1"] = NO.
+        """
+        import json as _json
+        raw = market.get("outcomePrices")
+        if isinstance(raw, str):
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                return None
+        if not isinstance(raw, list) or len(raw) < 2:
+            return None
+        try:
+            yes_price = float(raw[0])
+            no_price  = float(raw[1])
+        except Exception:
+            return None
+        if yes_price == 1.0 and no_price == 0.0:
+            return True   # YES won
+        if yes_price == 0.0 and no_price == 1.0:
+            return False  # NO won
+        return None       # not yet resolved
 
     def _calc_pnl(self, trade: Trade, markets: dict):
         """Calculate P&L from pre-fetched market dict. Returns None if not found/resolved."""
         market = markets.get(trade.condition_id)
         if not market:
             return None
-        resolved = market.get("resolved") or market.get("closed") or market.get("isResolved")
-        if not resolved:
+        resolved_yes = self._parse_winner(market)
+        if resolved_yes is None:
             return None
-        resolution = market.get("resolution") or market.get("resolvedOutcome")
-        if resolution is None:
-            return None
-        res_str = str(resolution).strip().lower()
-        resolved_yes = res_str in ("yes", "1", "true")
         won = (trade.side == "YES" and resolved_yes) or (trade.side == "NO" and not resolved_yes)
         if won:
             payout = trade.amount_usdc / trade.price if trade.price else 0
@@ -188,28 +222,9 @@ class PnLTracker:
         market = await self._get_market_by_condition(trade.condition_id)
         if not market:
             return None
-
-        # Check if resolved — Gamma API uses several field names
-        resolved = (
-            market.get("resolved")
-            or market.get("closed")
-            or market.get("isResolved")
-        )
-        if not resolved:
+        resolved_yes = self._parse_winner(market)
+        if resolved_yes is None:
             return None
-
-        # Get resolution outcome
-        resolution = (
-            market.get("resolution")
-            or market.get("resolvedOutcome")
-            or market.get("resolutionSource")
-        )
-        if resolution is None:
-            return None
-
-        # Normalise: "Yes"/"No"/1/0/"1"/"0"
-        res_str = str(resolution).strip().lower()
-        resolved_yes = res_str in ("yes", "1", "true")
 
         won = (trade.side == "YES" and resolved_yes) or \
               (trade.side == "NO"  and not resolved_yes)
