@@ -220,9 +220,8 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
 
 @app.get("/api/pnl/debug")
 async def debug_pnl(session: AsyncSession = Depends(get_session)):
-    """Show resolution status of recent trades."""
+    """Show resolution status of recent trades via CLOB API."""
     import httpx
-    # Get a mix of trades — try to find sports/short-term ones
     result = await session.execute(
         select(Trade).where(Trade.status == "DRY_RUN").order_by(Trade.created_at).limit(20)
     )
@@ -230,20 +229,21 @@ async def debug_pnl(session: AsyncSession = Depends(get_session)):
     debug = []
     async with httpx.AsyncClient(timeout=10) as client:
         for t in trades:
-            r = await client.get("https://gamma-api.polymarket.com/markets",
-                                  params={"conditionId": t.condition_id, "limit": 1})
-            items = r.json() if r.status_code == 200 else []
-            if isinstance(items, dict):
-                items = items.get("markets", [])
-            m = items[0] if items else {}
+            r = await client.get(f"https://clob.polymarket.com/markets/{t.condition_id}")
+            data = r.json() if r.status_code == 200 else {}
+            tokens = data.get("tokens", [])
+            winner = next(
+                (tok.get("outcome") for tok in tokens
+                 if isinstance(tok, dict) and tok.get("winner") is True),
+                None
+            )
             debug.append({
                 "question": t.question[:60],
                 "side": t.side,
                 "price": t.price,
-                "closed": m.get("closed"),
-                "outcomePrices": m.get("outcomePrices"),
+                "closed": data.get("closed"),
+                "winner": winner,
             })
-    # Count how many are actually closed
     closed_count = sum(1 for d in debug if d["closed"])
     return {"closed_count": closed_count, "total_checked": len(debug), "trades": debug}
 
