@@ -30,15 +30,22 @@ class PnLTracker:
                    "total_pnl": 0.0, "total_staked": 0.0}
 
         async with AsyncSessionLocal() as session:
-            # Get trades without P&L yet
             result = await session.execute(
                 select(Trade).where(Trade.pnl == None, Trade.status == "DRY_RUN")  # noqa
             )
             trades = result.scalars().all()
             summary["checked"] = len(trades)
+            logger.info(f"P&L check: {len(trades)} unresolved trades")
+
+            # First bulk-fetch resolved markets from Gamma API
+            resolved_markets = await self._fetch_resolved_markets()
+            logger.info(f"P&L check: found {len(resolved_markets)} resolved markets from Gamma")
 
             for trade in trades:
-                pnl = await self._resolve_trade(trade)
+                pnl = self._calc_pnl(trade, resolved_markets)
+                if pnl is None:
+                    # Fall back to individual lookup
+                    pnl = await self._resolve_trade(trade)
                 if pnl is not None:
                     trade.pnl = pnl
                     trade.status = "RESOLVED"
@@ -95,19 +102,108 @@ class PnLTracker:
                 "worst_trade":   min((t.pnl for t in trades if t.pnl), default=0),
             }
 
+    async def _fetch_resolved_markets(self) -> dict:
+        """Bulk fetch resolved markets from Gamma API. Returns dict keyed by conditionId."""
+        client = await self.client._get()
+        result = {}
+        offset = 0
+        while True:
+            try:
+                r = await client.get(
+                    "https://gamma-api.polymarket.com/markets",
+                    params={"closed": "true", "resolved": "true", "limit": 100, "offset": offset}
+                )
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                items = data if isinstance(data, list) else data.get("markets", [])
+                if not items:
+                    break
+                for m in items:
+                    cid = m.get("conditionId") or m.get("condition_id")
+                    if cid:
+                        result[cid] = m
+                if len(items) < 100:
+                    break
+                offset += 100
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"Bulk fetch error: {e}")
+                break
+        return result
+
+    def _calc_pnl(self, trade: Trade, markets: dict):
+        """Calculate P&L from pre-fetched market dict. Returns None if not found/resolved."""
+        market = markets.get(trade.condition_id)
+        if not market:
+            return None
+        resolved = market.get("resolved") or market.get("closed") or market.get("isResolved")
+        if not resolved:
+            return None
+        resolution = market.get("resolution") or market.get("resolvedOutcome")
+        if resolution is None:
+            return None
+        res_str = str(resolution).strip().lower()
+        resolved_yes = res_str in ("yes", "1", "true")
+        won = (trade.side == "YES" and resolved_yes) or (trade.side == "NO" and not resolved_yes)
+        if won:
+            payout = trade.amount_usdc / trade.price if trade.price else 0
+            return round(payout - trade.amount_usdc, 4)
+        return round(-trade.amount_usdc, 4)
+
+    async def _get_market_by_condition(self, condition_id: str):
+        """Try multiple Gamma API lookup strategies for a condition ID."""
+        client = await self.client._get()
+
+        # Strategy 1: path param (works for numeric market IDs)
+        try:
+            r = await client.get(f"https://gamma-api.polymarket.com/markets/{condition_id}")
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict) and data:
+                    return data
+        except Exception:
+            pass
+
+        # Strategy 2: query param conditionIds
+        try:
+            r = await client.get(
+                "https://gamma-api.polymarket.com/markets",
+                params={"conditionIds": condition_id, "limit": 1}
+            )
+            if r.status_code == 200:
+                data = r.json()
+                items = data if isinstance(data, list) else data.get("markets", [])
+                if items:
+                    return items[0]
+        except Exception:
+            pass
+
+        return None
+
     async def _resolve_trade(self, trade: Trade):
         """Return net P&L for a trade if market has resolved, else None."""
-        market = await self.client.get_market(trade.condition_id)
+        market = await self._get_market_by_condition(trade.condition_id)
         if not market:
             return None
 
-        # Check if resolved
-        resolved = market.get("resolved") or market.get("closed")
+        # Check if resolved — Gamma API uses several field names
+        resolved = (
+            market.get("resolved")
+            or market.get("closed")
+            or market.get("isResolved")
+        )
         if not resolved:
             return None
 
         # Get resolution outcome
-        resolution = market.get("resolution") or market.get("resolvedOutcome")
+        resolution = (
+            market.get("resolution")
+            or market.get("resolvedOutcome")
+            or market.get("resolutionSource")
+        )
         if resolution is None:
             return None
 
