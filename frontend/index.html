@@ -431,7 +431,12 @@ async function loadStatus() {
     balEl.style.color = 'var(--green)';
     balLbl.textContent = 'Live Balance';
     apiFetch('/api/live_balance').then(b => {
-      balEl.textContent = b?.balance != null ? `$${b.balance.toFixed(2)}` : 'Check Polymarket';
+      if (!b) return;
+      const pnl = b.balance ?? 0;
+      const sign = pnl >= 0 ? '+' : '';
+      balEl.textContent = `${sign}$${pnl.toFixed(2)}`;
+      balEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      balLbl.textContent = `Live P&L (${b.resolved} resolved)`;
     });
   }
   document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();

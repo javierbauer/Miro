@@ -35,7 +35,10 @@ class PnLTracker:
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(Trade).where(Trade.pnl == None, Trade.status == "DRY_RUN")  # noqa
+                select(Trade).where(
+                    Trade.pnl == None,  # noqa
+                    Trade.status.in_(["DRY_RUN", "FILLED", "PENDING"]),
+                )
             )
             trades = result.scalars().all()
             summary["checked"] = len(trades)
