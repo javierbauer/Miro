@@ -266,7 +266,7 @@
     </div>
     <div class="stat-card">
       <div class="value" id="s-balance" style="color:var(--yellow)">–</div>
-      <div class="label">Paper Balance</div>
+      <div class="label" id="s-balance-label">Paper Balance</div>
     </div>
   </div>
 
@@ -421,7 +421,19 @@ async function loadStatus() {
     stTxt.textContent = 'Scanner idle';
   }
   scanC.textContent = `Scans: ${s.scan_count}`;
-  document.getElementById('s-balance').textContent = s.dry_run ? `$${s.paper_balance?.toFixed(0)}` : '—';
+  const balEl = document.getElementById('s-balance');
+  const balLbl = document.getElementById('s-balance-label');
+  if (s.dry_run) {
+    balEl.style.color = 'var(--yellow)';
+    balLbl.textContent = 'Paper Balance';
+    balEl.textContent = `$${s.paper_balance?.toFixed(0) ?? '—'}`;
+  } else {
+    balEl.style.color = 'var(--green)';
+    balLbl.textContent = 'Live Balance';
+    apiFetch('/api/live_balance').then(b => {
+      balEl.textContent = b?.balance != null ? `$${b.balance.toFixed(2)}` : 'Check Polymarket';
+    });
+  }
   document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
 

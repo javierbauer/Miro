@@ -221,6 +221,36 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
     }
 
 
+@app.get("/api/live_balance")
+async def get_live_balance():
+    """Return actual USDC balance from Polymarket CLOB (live mode only)."""
+    if settings.dry_run:
+        return {"balance": None, "mode": "paper"}
+    try:
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+        creds = ApiCreds(
+            api_key=settings.polymarket_api_key,
+            api_secret=settings.polymarket_api_secret,
+            api_passphrase=settings.polymarket_api_passphrase,
+        )
+        client = ClobClient(
+            host=settings.clob_host,
+            key=settings.polymarket_private_key,
+            chain_id=137,
+            creds=creds,
+        )
+        info = client.get_balance_allowance(
+            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        raw = float(info.get("balance", 0))
+        balance = round(raw / 1e6, 2) if raw > 1000 else round(raw, 2)
+        return {"balance": balance, "mode": "live"}
+    except Exception as e:
+        logger.warning(f"Live balance fetch failed: {e}")
+        return {"balance": None, "mode": "live"}
+
+
 @app.get("/api/pnl/debug")
 async def debug_pnl(session: AsyncSession = Depends(get_session)):
     """Show resolution status of recent trades via CLOB API."""
