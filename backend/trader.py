@@ -166,9 +166,14 @@ class Trader:
     # ------------------------------------------------------------------ #
     async def _spent_today(self, session: AsyncSession) -> float:
         today = datetime.utcnow().strftime("%Y-%m-%d")
+        if self.dry_run:
+            status_filter = Trade.status == "DRY_RUN"
+        else:
+            status_filter = Trade.status.in_(["FILLED", "PENDING"])
         result = await session.execute(
             select(func.coalesce(func.sum(Trade.amount_usdc), 0)).where(
-                Trade.created_at >= today
+                Trade.created_at >= today,
+                status_filter,
             )
         )
         return float(result.scalar())
