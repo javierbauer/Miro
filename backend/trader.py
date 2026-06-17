@@ -118,6 +118,23 @@ class Trader:
         try:
             from py_clob_client.client import ClobClient
             from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderType
+            import httpx
+
+            # Fetch YES/NO token IDs from CLOB — condition_id is NOT the token_id
+            async with httpx.AsyncClient(timeout=10) as http:
+                r = await http.get(f"https://clob.polymarket.com/markets/{pred.condition_id}")
+            if r.status_code != 200:
+                logger.error(f"CLOB market lookup failed: {r.status_code}")
+                return None
+            tokens = r.json().get("tokens", [])
+            if len(tokens) < 2:
+                logger.error(f"No tokens for {pred.condition_id}")
+                return None
+            # token[0] = YES, token[1] = NO (matches outcomePrices ordering)
+            token_id = tokens[0 if side == "YES" else 1].get("token_id")
+            if not token_id:
+                logger.error(f"Token ID missing for side={side}")
+                return None
 
             creds = ApiCreds(
                 api_key=settings.polymarket_api_key,
@@ -131,10 +148,11 @@ class Trader:
                 creds=creds,
             )
 
-            # Market order at current price
+            # side is always "BUY" — we buy YES tokens or NO tokens
             order_args = MarketOrderArgs(
-                token_id=pred.condition_id,
+                token_id=token_id,
                 amount=size,
+                side="BUY",
             )
             signed = client.create_market_order(order_args)
             resp   = client.post_order(signed, OrderType.FOK)
