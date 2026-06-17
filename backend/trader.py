@@ -121,7 +121,8 @@ class Trader:
             import httpx
 
             # Fetch YES/NO token IDs from CLOB — condition_id is NOT the token_id
-            async with httpx.AsyncClient(timeout=10) as http:
+            proxy = settings.proxy_url or None
+            async with httpx.AsyncClient(timeout=10, proxy=proxy) as http:
                 r = await http.get(f"https://clob.polymarket.com/markets/{pred.condition_id}")
             if r.status_code != 200:
                 logger.error(f"CLOB market lookup failed: {r.status_code}")
@@ -135,6 +136,11 @@ class Trader:
             if not token_id:
                 logger.error(f"Token ID missing for side={side}")
                 return None
+
+            # Route py-clob-client through proxy if configured
+            if settings.proxy_url:
+                import os
+                os.environ["HTTPS_PROXY"] = settings.proxy_url
 
             creds = ApiCreds(
                 api_key=settings.polymarket_api_key,
