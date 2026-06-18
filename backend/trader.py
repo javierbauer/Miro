@@ -178,8 +178,8 @@ class Trader:
             logger.success(f"[LIVE] {side} ${size:.2f} on '{pred.question[:60]}' → {order_id}")
             return trade
 
-        except ImportError:
-            logger.error("py-clob-client not installed — falling back to paper trade")
+        except ImportError as _ie:
+            logger.error(f"ImportError in _live_trade: {_ie} — falling back to paper trade")
             return await self._paper_trade(pred, side, price, size, session)
         except Exception as exc:
             logger.error(f"Live trade failed: {exc}")
