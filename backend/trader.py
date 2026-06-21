@@ -2,7 +2,7 @@
 Trade executor.
 
 DRY_RUN=true  → paper trading (default, safe to run immediately)
-DRY_RUN=false → real trades via Polymarket CLOB API (requires credentials)
+DRY_RUN=false → real trades via polymarket-client SDK (requires credentials)
 
 Paper trading simulates fills at the current market price and tracks
 a virtual P&L so you can validate the strategy before going live.
@@ -105,7 +105,7 @@ class Trader:
         return trade
 
     # ------------------------------------------------------------------ #
-    #  Live trading via py-clob-client                                     #
+    #  Live trading via polymarket-client SDK                              #
     # ------------------------------------------------------------------ #
     async def _live_trade(
         self,
@@ -116,14 +116,16 @@ class Trader:
         session: AsyncSession,
     ) -> Optional[Trade]:
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderType
+            from polymarket import ApiKeyCreds, AsyncSecureClient
+            from decimal import Decimal
             import httpx
+            import os
+
+            proxy = settings.proxy_url or None
 
             # Fetch YES/NO token IDs from CLOB — condition_id is NOT the token_id
-            proxy = settings.proxy_url or None
             async with httpx.AsyncClient(timeout=10, proxy=proxy) as http:
-                r = await http.get(f"https://clob.polymarket.com/markets/{pred.condition_id}")
+                r = await http.get(f"{settings.clob_host}/markets/{pred.condition_id}")
             if r.status_code != 200:
                 logger.error(f"CLOB market lookup failed: {r.status_code}")
                 return None
@@ -137,37 +139,36 @@ class Trader:
                 logger.error(f"Token ID missing for side={side}")
                 return None
 
-            # Inject proxy into py-clob-client's shared httpx client
-            # (it uses a module-level singleton created at import time)
-            if settings.proxy_url:
-                import httpx as _httpx
-                from py_clob_client.http_helpers import helpers as _clob_helpers
-                _clob_helpers._http_client = _httpx.Client(
-                    http2=True,
-                    proxy=settings.proxy_url,
+            # Propagate proxy into the SDK's internal httpx clients (read env at creation time)
+            if proxy:
+                os.environ["HTTPS_PROXY"] = proxy
+                os.environ["HTTP_PROXY"] = proxy
+
+            client = await AsyncSecureClient._create(
+                private_key=settings.polymarket_private_key,
+                credentials=ApiKeyCreds(
+                    key=settings.polymarket_api_key,
+                    passphrase=settings.polymarket_api_passphrase,
+                    secret=settings.polymarket_api_secret,
+                ),
+                validate_credentials=False,
+            )
+            try:
+                # side is always "BUY" — we buy YES tokens or NO tokens
+                resp = await client.place_market_order(
+                    token_id=token_id,
+                    side="BUY",
+                    amount=Decimal(str(round(size, 2))),
                 )
+            finally:
+                await client.close()
 
-            creds = ApiCreds(
-                api_key=settings.polymarket_api_key,
-                api_secret=settings.polymarket_api_secret,
-                api_passphrase=settings.polymarket_api_passphrase,
-            )
-            client = ClobClient(
-                host=settings.clob_host,
-                key=settings.polymarket_private_key,
-                chain_id=137,
-                creds=creds,
-            )
+            if not getattr(resp, "ok", False):
+                logger.error(f"Order rejected by CLOB: {resp}")
+                return None
 
-            # side is always "BUY" — we buy YES tokens or NO tokens
-            order_args = MarketOrderArgs(
-                token_id=token_id,
-                amount=size,
-                side="BUY",
-            )
-            signed = client.create_market_order(order_args)
-            resp   = client.post_order(signed, OrderType.FOK)
-            order_id = resp.get("orderID", "UNKNOWN")
+            order_id = resp.order_id
+            status = "FILLED" if getattr(resp, "status", "") == "matched" else "PENDING"
 
             trade = Trade(
                 condition_id=pred.condition_id,
@@ -175,17 +176,20 @@ class Trader:
                 side=side,
                 amount_usdc=size,
                 price=price,
-                status="FILLED" if resp.get("status") == "matched" else "PENDING",
+                status=status,
                 order_id=order_id,
             )
             session.add(trade)
             await session.commit()
-            logger.success(f"[LIVE] {side} ${size:.2f} on '{pred.question[:60]}' → {order_id}")
+            logger.success(
+                f"[LIVE] {side} ${size:.2f} on '{pred.question[:60]}' "
+                f"@ {price:.3f} | edge={pred.edge:+.3f} | {order_id}"
+            )
             return trade
 
         except ImportError as _ie:
-            logger.error(f"ImportError in _live_trade: {_ie} — falling back to paper trade")
-            return await self._paper_trade(pred, side, price, size, session)
+            logger.error(f"ImportError in _live_trade: {_ie} — install: pip install --pre polymarket-client")
+            return None
         except Exception as exc:
             logger.error(f"Live trade failed: {exc}")
             return None

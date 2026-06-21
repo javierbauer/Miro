@@ -12,3 +12,4 @@ jinja2
 python-multipart
 pydantic
 pydantic-settings
+polymarket-client
