@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     max_daily_spend: float = 100.0
     dry_run: bool = True
     # Bankroll base for Kelly sizing in LIVE mode.  Leave unset to size off
-    # the wallet's real on-chain USDC balance (matches how paper sizes off
+    # the wallet's real CLOB collateral balance (matches how paper sizes off
     # its balance).  Set a number to pin it explicitly instead.
     live_bankroll: Optional[float] = None
 

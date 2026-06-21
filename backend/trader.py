@@ -22,14 +22,7 @@ from backend.predictor import PredictionResult
 
 PAPER_STARTING_BALANCE = 10_000.0   # raised to $10k so balance stays positive longer
 
-# USDC tokens on Polygon — Polymarket cash is held as one of these in the
-# proxy wallet.  We sum both so it works for native- and bridged-USDC accounts.
-NATIVE_USDC  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
-BRIDGED_USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-# Public Polygon RPCs (not geo-blocked, so they don't need the trading proxy).
-POLYGON_RPCS = ("https://1rpc.io/matic", "https://polygon-rpc.com",
-                "https://polygon.llamarpc.com")
-_BANKROLL_TTL = 60.0   # seconds — avoid re-querying RPC for every prediction
+_BANKROLL_TTL = 60.0   # seconds — cache the balance so a scan queries it once
 
 
 class Trader:
@@ -49,60 +42,65 @@ class Trader:
         return round(PAPER_STARTING_BALANCE - spent, 2)
 
     # ------------------------------------------------------------------ #
-    #  Live bankroll — real wallet cash, used as the Kelly base in live    #
+    #  SDK client — shared by balance lookups and live order placement     #
     # ------------------------------------------------------------------ #
-    async def _onchain_usdc(self, wallet: str) -> Optional[float]:
-        """Sum native + bridged USDC held by `wallet`. None if all RPCs fail."""
-        import httpx
-        selector = "0x70a08231" + wallet[2:].lower().zfill(64)
-        total: Optional[float] = None
-        # trust_env=False so the public RPC call ignores HTTPS_PROXY (which is
-        # for Polymarket only and would mangle the JSON-RPC request).
-        async with httpx.AsyncClient(timeout=12, trust_env=False) as http:
-            for token in (NATIVE_USDC, BRIDGED_USDC):
-                for rpc in POLYGON_RPCS:
-                    try:
-                        r = await http.post(rpc, json={
-                            "jsonrpc": "2.0", "method": "eth_call",
-                            "params": [{"to": token, "data": selector}, "latest"],
-                            "id": 1,
-                        })
-                        res = r.json().get("result")
-                        if res is not None:
-                            total = (total or 0.0) + int(res, 16) / 1e6
-                            break   # this token done, next token
-                    except Exception:
-                        continue
-        return total
+    async def _make_client(self):
+        """Build an authenticated AsyncSecureClient for the trading wallet.
+
+        Type-1 POLY_PROXY accounts (created via the Polymarket web UI) need
+        the proxy address passed explicitly so the SDK signs as that maker;
+        omit it (None) to fall back to the type-3 deposit-wallet flow.
+        """
+        import os
+        from polymarket import AsyncSecureClient, ApiKeyCreds
+
+        proxy = settings.proxy_url or None
+        if proxy:   # SDK reads these at client-creation time
+            os.environ["HTTPS_PROXY"] = proxy
+            os.environ["HTTP_PROXY"] = proxy
+        return await AsyncSecureClient._create(
+            private_key=settings.polymarket_private_key,
+            wallet=settings.polymarket_proxy_wallet or None,
+            credentials=ApiKeyCreds(
+                key=settings.polymarket_api_key,
+                passphrase=settings.polymarket_api_passphrase,
+                secret=settings.polymarket_api_secret,
+            ),
+            validate_credentials=False,
+        )
 
     async def live_bankroll(self) -> float:
         """Kelly bankroll for LIVE mode.
 
-        Precedence: explicit LIVE_BANKROLL override → real on-chain wallet
-        cash → max_daily_spend as a safe fallback (so a failed balance fetch
-        never inflates bet size).
+        Precedence: explicit LIVE_BANKROLL override → real CLOB collateral
+        balance (the spendable cash the exchange reports) → max_daily_spend
+        as a safe fallback, so a failed balance fetch never inflates bet size.
         """
         import time
         if settings.live_bankroll:
             return float(settings.live_bankroll)
 
-        # short-lived cache so a multi-trade scan hits RPC at most once
+        # short-lived cache so a multi-trade scan queries the balance once
         if self._bankroll_cache:
             value, ts = self._bankroll_cache
             if time.monotonic() - ts < _BANKROLL_TTL:
                 return value
 
         bankroll = float(settings.max_daily_spend)   # safe default
-        wallet = settings.polymarket_proxy_wallet
-        if wallet:
-            cash = await self._onchain_usdc(wallet)
-            if cash is not None and cash > 0:
-                bankroll = cash
-            elif cash is None:
-                logger.warning(
-                    "Live bankroll: could not read on-chain USDC — falling "
-                    f"back to max_daily_spend (${bankroll:.2f})"
-                )
+        try:
+            client = await self._make_client()
+            try:
+                ba = await client.get_balance_allowance(asset_type="COLLATERAL")
+                cash = float(ba.balance) / 1e6   # micro-USDC → USDC
+                if cash > 0:
+                    bankroll = cash
+            finally:
+                await client.close()
+        except Exception as exc:
+            logger.warning(
+                f"Live bankroll: balance fetch failed ({exc}) — falling back "
+                f"to max_daily_spend (${bankroll:.2f})"
+            )
         self._bankroll_cache = (bankroll, time.monotonic())
         return bankroll
 
@@ -185,10 +183,8 @@ class Trader:
         session: AsyncSession,
     ) -> Optional[Trade]:
         try:
-            from polymarket import AsyncSecureClient
             from decimal import Decimal
             import httpx
-            import os
 
             proxy = settings.proxy_url or None
 
@@ -208,26 +204,7 @@ class Trader:
                 logger.error(f"Token ID missing for side={side}")
                 return None
 
-            # Propagate proxy into the SDK's internal httpx clients (read env at creation time)
-            if proxy:
-                os.environ["HTTPS_PROXY"] = proxy
-                os.environ["HTTP_PROXY"] = proxy
-
-            from polymarket import ApiKeyCreds
-            # If the account was set up via the Polymarket web UI it uses a
-            # type-1 POLY_PROXY wallet.  Pass the proxy address explicitly so
-            # the SDK signs orders as that maker; omit (None) to fall back to
-            # the type-3 deposit-wallet flow for bot-only accounts.
-            client = await AsyncSecureClient._create(
-                private_key=settings.polymarket_private_key,
-                wallet=settings.polymarket_proxy_wallet or None,
-                credentials=ApiKeyCreds(
-                    key=settings.polymarket_api_key,
-                    passphrase=settings.polymarket_api_passphrase,
-                    secret=settings.polymarket_api_secret,
-                ),
-                validate_credentials=False,
-            )
+            client = await self._make_client()
             logger.info(f"[LIVE] SDK wallet: {client._ctx.wallet}")
             try:
                 # side is always "BUY" — we buy YES tokens or NO tokens

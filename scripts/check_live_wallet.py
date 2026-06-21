@@ -161,12 +161,16 @@ async def main() -> int:
             from backend.trader import Trader
             bankroll = await Trader(dry_run=False).live_bankroll()
             src = ("LIVE_BANKROLL override" if settings.live_bankroll
-                   else "real on-chain wallet cash")
+                   else "CLOB collateral balance")
             _ok(f"live Kelly bankroll = ${bankroll:.2f}  (from {src})")
-            if not settings.live_bankroll and bankroll <= settings.max_daily_spend:
-                _info("bankroll fell back to max_daily_spend — if your real "
-                      "cash is higher, the on-chain read may have failed; set "
-                      "LIVE_BANKROLL=<amount> in .env to pin it")
+            # The balance fetch falls back to exactly max_daily_spend on
+            # failure — flag that specific case so it isn't mistaken for a
+            # real balance that happens to be low.
+            if (not settings.live_bankroll
+                    and bankroll == float(settings.max_daily_spend)):
+                _info("bankroll equals max_daily_spend — this is the fallback "
+                      "value, so the balance fetch may have failed; set "
+                      "LIVE_BANKROLL=<amount> in .env to pin it explicitly")
                 warnings += 1
         finally:
             await client.close()
