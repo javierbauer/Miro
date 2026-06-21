@@ -116,7 +116,7 @@ class Trader:
         session: AsyncSession,
     ) -> Optional[Trade]:
         try:
-            from polymarket import ApiKeyCreds, AsyncSecureClient
+            from polymarket import AsyncSecureClient
             from decimal import Decimal
             import httpx
             import os
@@ -144,19 +144,10 @@ class Trader:
                 os.environ["HTTPS_PROXY"] = proxy
                 os.environ["HTTP_PROXY"] = proxy
 
-            # Derive EOA wallet address from private key — Polymarket API keys
-            # are scoped to the EOA address, not the derived deposit-wallet proxy
-            from eth_account import Account
-            wallet_address = Account.from_key(settings.polymarket_private_key).address
-
+            # Use L2 header auth (ECDSA per-request signing) — no API key needed.
+            # The deposit wallet flow authenticates via signature, not API key credentials.
             client = await AsyncSecureClient._create(
                 private_key=settings.polymarket_private_key,
-                wallet=wallet_address,
-                credentials=ApiKeyCreds(
-                    key=settings.polymarket_api_key,
-                    passphrase=settings.polymarket_api_passphrase,
-                    secret=settings.polymarket_api_secret,
-                ),
                 validate_credentials=False,
             )
             try:
