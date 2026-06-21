@@ -22,11 +22,21 @@ from backend.predictor import PredictionResult
 
 PAPER_STARTING_BALANCE = 10_000.0   # raised to $10k so balance stays positive longer
 
+# USDC tokens on Polygon — Polymarket cash is held as one of these in the
+# proxy wallet.  We sum both so it works for native- and bridged-USDC accounts.
+NATIVE_USDC  = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+BRIDGED_USDC = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# Public Polygon RPCs (not geo-blocked, so they don't need the trading proxy).
+POLYGON_RPCS = ("https://1rpc.io/matic", "https://polygon-rpc.com",
+                "https://polygon.llamarpc.com")
+_BANKROLL_TTL = 60.0   # seconds — avoid re-querying RPC for every prediction
+
 
 class Trader:
     def __init__(self, dry_run: Optional[bool] = None):
         self.dry_run = dry_run if dry_run is not None else settings.dry_run
         self._daily_spent = 0.0
+        self._bankroll_cache: Optional[tuple] = None   # (value, monotonic_ts)
 
     async def paper_balance(self, session: AsyncSession) -> float:
         """Calculate balance from trade history so it persists across restarts."""
@@ -37,6 +47,64 @@ class Trader:
         )
         spent = float(result.scalar())
         return round(PAPER_STARTING_BALANCE - spent, 2)
+
+    # ------------------------------------------------------------------ #
+    #  Live bankroll — real wallet cash, used as the Kelly base in live    #
+    # ------------------------------------------------------------------ #
+    async def _onchain_usdc(self, wallet: str) -> Optional[float]:
+        """Sum native + bridged USDC held by `wallet`. None if all RPCs fail."""
+        import httpx
+        selector = "0x70a08231" + wallet[2:].lower().zfill(64)
+        total: Optional[float] = None
+        # trust_env=False so the public RPC call ignores HTTPS_PROXY (which is
+        # for Polymarket only and would mangle the JSON-RPC request).
+        async with httpx.AsyncClient(timeout=12, trust_env=False) as http:
+            for token in (NATIVE_USDC, BRIDGED_USDC):
+                for rpc in POLYGON_RPCS:
+                    try:
+                        r = await http.post(rpc, json={
+                            "jsonrpc": "2.0", "method": "eth_call",
+                            "params": [{"to": token, "data": selector}, "latest"],
+                            "id": 1,
+                        })
+                        res = r.json().get("result")
+                        if res is not None:
+                            total = (total or 0.0) + int(res, 16) / 1e6
+                            break   # this token done, next token
+                    except Exception:
+                        continue
+        return total
+
+    async def live_bankroll(self) -> float:
+        """Kelly bankroll for LIVE mode.
+
+        Precedence: explicit LIVE_BANKROLL override → real on-chain wallet
+        cash → max_daily_spend as a safe fallback (so a failed balance fetch
+        never inflates bet size).
+        """
+        import time
+        if settings.live_bankroll:
+            return float(settings.live_bankroll)
+
+        # short-lived cache so a multi-trade scan hits RPC at most once
+        if self._bankroll_cache:
+            value, ts = self._bankroll_cache
+            if time.monotonic() - ts < _BANKROLL_TTL:
+                return value
+
+        bankroll = float(settings.max_daily_spend)   # safe default
+        wallet = settings.polymarket_proxy_wallet
+        if wallet:
+            cash = await self._onchain_usdc(wallet)
+            if cash is not None and cash > 0:
+                bankroll = cash
+            elif cash is None:
+                logger.warning(
+                    "Live bankroll: could not read on-chain USDC — falling "
+                    f"back to max_daily_spend (${bankroll:.2f})"
+                )
+        self._bankroll_cache = (bankroll, time.monotonic())
+        return bankroll
 
     # ------------------------------------------------------------------ #
     #  Public interface                                                    #
@@ -57,8 +125,9 @@ class Trader:
             logger.warning("Daily budget exhausted — skipping all trades")
             return None
 
-        # Size the bet via Kelly
-        bankroll = (await self.paper_balance(session)) if self.dry_run else settings.max_daily_spend
+        # Size the bet via Kelly.  Paper sizes off its virtual balance; live
+        # sizes off the wallet's real cash (same risk logic, real capital).
+        bankroll = (await self.paper_balance(session)) if self.dry_run else (await self.live_bankroll())
         raw_size = bankroll * prediction.kelly_fraction
         size = min(raw_size, settings.max_bet_usdc, remaining)
         size = round(max(size, 1.0), 2)   # minimum $1 bet

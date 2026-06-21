@@ -156,6 +156,18 @@ async def main() -> int:
                 _info("could not reach any RPC to confirm deployment "
                       "(non-fatal) — verify funds are visible in the UI")
                 warnings += 1
+
+            # ---- live Kelly bankroll (what live sizing will use) --------
+            from backend.trader import Trader
+            bankroll = await Trader(dry_run=False).live_bankroll()
+            src = ("LIVE_BANKROLL override" if settings.live_bankroll
+                   else "real on-chain wallet cash")
+            _ok(f"live Kelly bankroll = ${bankroll:.2f}  (from {src})")
+            if not settings.live_bankroll and bankroll <= settings.max_daily_spend:
+                _info("bankroll fell back to max_daily_spend — if your real "
+                      "cash is higher, the on-chain read may have failed; set "
+                      "LIVE_BANKROLL=<amount> in .env to pin it")
+                warnings += 1
         finally:
             await client.close()
 
