@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # its balance).  Set a number to pin it explicitly instead.
     live_bankroll: Optional[float] = None
 
+    # AI predictor
+    anthropic_api_key: Optional[str] = None   # set to enable Claude-powered predictions
+
     # Proxy for CLOB API (needed if VPS is in US or other blocked region)
     proxy_url: Optional[str] = None  # e.g. socks5://user:pass@host:port
     clob_host: str = "https://clob.polymarket.com"

@@ -101,7 +101,7 @@ class MarketScanner:
         await session.merge(db_market)
 
         # Generate prediction
-        pred = self.predictor.predict(market)
+        pred = await self.predictor.predict(market)
         if pred is None:
             return
 

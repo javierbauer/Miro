@@ -1,15 +1,16 @@
 """
-Prediction engine — the "Ralph Loop" style probability estimator.
+Prediction engine — Claude AI-powered probability estimator.
 
-Strategy (simple but profitable):
-  1. Price momentum — markets with recent price drift tend to continue short-term.
-  2. Volume signal  — high 24h volume + thin spread = efficient price → skip.
-                      low volume + wide spread = inefficiency → trade.
-  3. Kelly edge     — only bet when our estimated probability diverges enough
-                      from the market price to justify risk-adjusted sizing.
-  4. Recency bias   — markets closing soon with skewed prices are often mis-priced.
+Strategy:
+  1. Basic filters — skip illiquid, stale, too-efficient, or far-out markets.
+  2. AI estimate  — call Claude to get a genuine probability for YES resolving,
+                    independent of the market price.
+  3. Edge check   — only bet when the AI probability diverges enough from the
+                    market price to justify risk-adjusted sizing.
+  4. Kelly sizing — fractional Kelly with confidence modulation.
 
-No ML model needed for overnight operation — pure quant signals are fast & robust.
+When ANTHROPIC_API_KEY is not set, falls back to the heuristic estimator so
+the bot can still run (with degraded accuracy) without credentials.
 """
 import math
 from dataclasses import dataclass, field
@@ -36,27 +37,30 @@ class PredictionResult:
 
 class Predictor:
     """
-    Stateless market signal generator.
-    Call predict(market_dict) for each enriched market.
+    Async market signal generator backed by Claude AI.
+
+    Call `await predict(market_dict)` for each enriched market dict.
+    Falls back to heuristic signals when Anthropic API key is not configured.
     """
 
     # --- tunable knobs ---------------------------------------------------
-    MIN_LIQUIDITY       = 500.0       # ignore thin markets
-    MIN_VOLUME_24H      = 100.0       # ignore stale markets
-    MAX_VOLUME_24H      = 5_000_000   # too efficient above this
-    MIN_EDGE            = 0.04        # 4 cent edge minimum
-    MIN_CONFIDENCE      = 0.55        # confidence gate
-    MAX_KELLY_FRAC      = 0.05        # cap bet size at 5% of bankroll
-    MAX_DAYS_TO_CLOSE   = 7           # only trade markets resolving within 7 days
-    PREFER_SHORT_TERM   = True        # boost confidence for short-term markets
+    MIN_LIQUIDITY       = 500.0
+    MIN_VOLUME_24H      = 100.0
+    MAX_VOLUME_24H      = 5_000_000
+    MIN_EDGE            = 0.05        # slightly higher than heuristic — AI edges are real
+    MIN_CONFIDENCE      = 0.55
+    MAX_KELLY_FRAC      = 0.05
+    MAX_DAYS_TO_CLOSE   = 7
 
-    def predict(self, market: dict) -> Optional[PredictionResult]:
+    async def predict(self, market: dict) -> Optional[PredictionResult]:
         condition_id = market.get("conditionId") or market.get("condition_id", "")
         question     = market.get("question", "Unknown")
         yes_price    = market.get("_yes_price", 0.5)
         no_price     = market.get("_no_price", round(1 - yes_price, 4))
         volume_24h   = self._float(market.get("volume24hr") or market.get("volume", 0))
         liquidity    = self._float(market.get("liquidity", 0))
+        description  = market.get("description") or market.get("shortDescription") or ""
+        category     = market.get("category") or market.get("groupItemTitle") or ""
 
         # ── basic filters ──────────────────────────────────────────────
         if liquidity < self.MIN_LIQUIDITY:
@@ -64,45 +68,35 @@ class Predictor:
         if volume_24h < self.MIN_VOLUME_24H:
             return None
         if volume_24h > self.MAX_VOLUME_24H:
-            return None   # too efficient
+            return None
         if yes_price <= 0.05 or yes_price >= 0.95:
-            return None   # too extreme / near-resolved — skip
+            return None
 
-        # ── short-term filter: skip markets that resolve too far out ───
         days_left = self._days_to_close(market)
         if days_left is not None and days_left > self.MAX_DAYS_TO_CLOSE:
             return None
         if days_left is not None and days_left < 0.1:
-            return None   # resolving in < 2.4 hours — too late to trade
+            return None
 
-        # ── signals ────────────────────────────────────────────────────
-        spread_signal   = self._spread_signal(yes_price, no_price)
-        volume_signal   = self._volume_signal(volume_24h, liquidity)
-        recency_signal  = self._recency_signal(market)
-        momentum_signal = self._momentum_signal(market)
-
-        # Weighted average of signals → estimated true probability
-        weights = [0.35, 0.25, 0.25, 0.15]
-        signals = [spread_signal, volume_signal, recency_signal, momentum_signal]
-        pred_yes = sum(w * s for w, s in zip(weights, signals))
-        pred_yes = max(0.01, min(0.99, pred_yes))
+        # ── probability estimate (AI or heuristic fallback) ────────────
+        pred_yes, ai_conf, ai_reasoning = await self._estimate_prob(
+            condition_id, question, description, yes_price, category, days_left
+        )
 
         edge_yes = pred_yes - yes_price
         edge_no  = (1 - pred_yes) - no_price
 
-        # Only trade the side with a POSITIVE edge
         if edge_yes >= edge_no and edge_yes > 0:
             bet_side, best_edge = "YES", edge_yes
         elif edge_no > edge_yes and edge_no > 0:
             bet_side, best_edge = "NO", edge_no
         else:
-            bet_side, best_edge = "YES", max(edge_yes, edge_no)  # both ≤ 0 → will SKIP
+            bet_side, best_edge = "YES", max(edge_yes, edge_no)
 
         bet_price = yes_price if bet_side == "YES" else no_price
         bet_prob  = pred_yes  if bet_side == "YES" else (1 - pred_yes)
 
-        # Confidence: edge + liquidity + recency bonus for short-term markets
-        confidence = self._confidence(best_edge, liquidity, volume_24h, days_left)
+        confidence = self._confidence(best_edge, liquidity, volume_24h, days_left, ai_conf)
 
         if best_edge < self.MIN_EDGE or confidence < self.MIN_CONFIDENCE:
             signal = "SKIP"
@@ -113,8 +107,7 @@ class Predictor:
 
         days_str = f"{days_left:.1f}d" if days_left is not None else "unknown"
         reasoning = (
-            f"spread_signal={spread_signal:.3f} vol_signal={volume_signal:.3f} "
-            f"recency={recency_signal:.3f} momentum={momentum_signal:.3f} | "
+            f"{ai_reasoning} | "
             f"pred_yes={pred_yes:.3f} market_yes={yes_price:.3f} "
             f"edge={best_edge:+.3f} conf={confidence:.2f} closes_in={days_str}"
         )
@@ -135,80 +128,58 @@ class Predictor:
         )
 
     # ------------------------------------------------------------------ #
-    #  Individual signals (all return a probability 0..1 for YES)         #
+    #  Probability estimation                                              #
     # ------------------------------------------------------------------ #
-    def _spread_signal(self, yes: float, no: float) -> float:
-        """
-        A price of 0.5 is neutral.  If the spread (yes+no) < 1.0, prices are
-        inefficient and we lean toward the cheaper side.
-        """
-        total = yes + no
-        if total < 0.97:      # wide spread → markets underpricing both sides
-            return yes        # keep neutral-ish, let other signals decide
-        # Near-fair market
-        return yes
+    async def _estimate_prob(
+        self,
+        condition_id: str,
+        question: str,
+        description: str,
+        yes_price: float,
+        category: str,
+        days_left: Optional[float],
+    ) -> tuple[float, float, str]:
+        """Return (prob, ai_conf_weight 0–1, reasoning).
 
-    def _volume_signal(self, vol: float, liq: float) -> float:
+        Tries Claude AI first; falls back to the heuristic blend if the
+        API key is missing or any error occurs.
         """
-        Low vol/liq ratio → stale price, higher chance of edge.
-        We don't change the direction here, just modulate confidence later.
-        Returns prior-biased 0.5.
-        """
-        return 0.5            # direction-neutral signal; affects confidence
+        from backend.config import settings
 
-    def _recency_signal(self, market: dict) -> float:
-        """
-        Markets closing within 24h that are priced near 0.5 tend to resolve
-        quickly in one direction.  We nudge slightly toward current price.
-        """
-        end_str = market.get("endDate") or market.get("end_date_iso")
-        yes = market.get("_yes_price", 0.5)
-        if not end_str:
-            return yes
-        try:
-            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            hours_left = (end - datetime.now(timezone.utc)).total_seconds() / 3600
-            if 1 < hours_left < 24 and 0.35 < yes < 0.65:
-                # Close to deadline + near 50/50 → momentum push
-                return yes + (0.5 - yes) * 0.1   # tiny mean-reversion
-        except Exception:
-            pass
-        return yes
+        if settings.anthropic_api_key:
+            from backend.ai_predictor import ai_estimate
+            return await ai_estimate(
+                condition_id=condition_id,
+                question=question,
+                description=description,
+                yes_price=yes_price,
+                category=category,
+                days_left=days_left,
+                api_key=settings.anthropic_api_key,
+            )
 
-    def _momentum_signal(self, market: dict) -> float:
-        """
-        Use the 1h price change if available from Gamma API.
-        Positive momentum → lean YES; negative → lean NO.
-        """
-        yes = market.get("_yes_price", 0.5)
-        change_1h = self._float(market.get("change1h") or market.get("priceChange1h", 0))
-        if abs(change_1h) > 0.001:
-            nudge = max(-0.1, min(0.1, change_1h * 2))
-            return max(0.01, min(0.99, yes + nudge))
-        return yes
+        # Heuristic fallback (no AI key)
+        return self._heuristic_prob(yes_price), 0.5, "heuristic (no AI key)"
 
-    def _days_to_close(self, market: dict) -> Optional[float]:
-        """Return days until market closes, or None if unknown."""
-        end_str = market.get("endDate") or market.get("end_date_iso")
-        if not end_str:
-            return None
-        try:
-            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-            return (end - datetime.now(timezone.utc)).total_seconds() / 86400
-        except Exception:
-            return None
+    def _heuristic_prob(self, yes_price: float) -> float:
+        """Simple mean-reversion heuristic used when AI is unavailable."""
+        return round(yes_price * 0.75 + 0.5 * 0.25, 4)
 
-    def _confidence(self, edge: float, liquidity: float, volume: float,
-                    days_left: Optional[float] = None) -> float:
-        """
-        Confidence = f(edge magnitude, liquidity depth, volume, time to close).
-        Short-term markets get a bonus — faster feedback = more reliable signal.
-        """
+    # ------------------------------------------------------------------ #
+    #  Kelly + confidence                                                  #
+    # ------------------------------------------------------------------ #
+    def _confidence(
+        self,
+        edge: float,
+        liquidity: float,
+        volume: float,
+        days_left: Optional[float] = None,
+        ai_conf_weight: float = 1.0,
+    ) -> float:
         edge_score = min(1.0, edge / 0.15)
         liq_score  = min(1.0, math.log10(max(liquidity, 10)) / 5)
         vol_score  = max(0.0, 1.0 - volume / self.MAX_VOLUME_24H)
 
-        # Recency bonus: markets closing within 1 day get +0.1, within 3 days +0.05
         recency_bonus = 0.0
         if days_left is not None:
             if days_left <= 1:
@@ -217,18 +188,26 @@ class Predictor:
                 recency_bonus = 0.05
 
         base = 0.4 * edge_score + 0.35 * liq_score + 0.25 * vol_score
-        return round(min(1.0, base + recency_bonus), 3)
+        raw  = min(1.0, base + recency_bonus)
+        # AI confidence modulates: low-confidence AI calls require more edge
+        return round(raw * ai_conf_weight, 3)
 
     def _kelly(self, prob: float, price: float) -> float:
-        """
-        Fractional Kelly criterion: f = (prob - price) / (1 - price)
-        Capped at MAX_KELLY_FRAC and half-Kelly applied for safety.
-        """
         if price <= 0 or price >= 1:
             return 0.0
         full_kelly = (prob - price) / (1 - price)
         half_kelly = full_kelly * 0.5
         return round(max(0.0, min(self.MAX_KELLY_FRAC, half_kelly)), 4)
+
+    def _days_to_close(self, market: dict) -> Optional[float]:
+        end_str = market.get("endDate") or market.get("end_date_iso")
+        if not end_str:
+            return None
+        try:
+            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            return (end - datetime.now(timezone.utc)).total_seconds() / 86400
+        except Exception:
+            return None
 
     @staticmethod
     def _float(v) -> float:
