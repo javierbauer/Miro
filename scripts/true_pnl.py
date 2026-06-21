@@ -14,7 +14,6 @@ Usage:
     python scripts/true_pnl.py
 """
 import asyncio
-import json
 import os
 import sys
 
@@ -25,52 +24,32 @@ from sqlalchemy import select
 from backend.database import AsyncSessionLocal, Trade
 from backend.config import settings
 
-GAMMA = "https://gamma-api.polymarket.com"
+CLOB = "https://clob.polymarket.com"
 
 
-def winning_index(outcome_prices):
-    """Return 0 or 1 for the winning Gamma outcome, or None if unresolved."""
+async def fetch_clob_market(http, condition_id, cache):
+    """Return (yes_won: bool|None, closed: bool) using CLOB ground truth.
+
+    yes_won = did Gamma/CLOB outcome index 0 (the bet's YES) win.  This is
+    the same logic the audit used, verified by eye against real outcomes.
+    """
+    if condition_id in cache:
+        return cache[condition_id]
+    result = (None, False)
     try:
-        op = [float(x) for x in outcome_prices]
+        r = await http.get(f"{CLOB}/markets/{condition_id}")
+        if r.status_code == 200:
+            m = r.json()
+            closed = bool(m.get("closed"))
+            tokens = m.get("tokens", [])
+            win_idx = next((i for i, tk in enumerate(tokens)
+                            if isinstance(tk, dict) and tk.get("winner") is True), None)
+            yes_won = (win_idx == 0) if win_idx is not None else None
+            result = (yes_won, closed)
     except Exception:
-        return None
-    if len(op) < 2:
-        return None
-    if max(op) > 0.9 and min(op) < 0.1:          # cleanly resolved
-        return 0 if op[0] > op[1] else 1
-    return None
-
-
-async def fetch_gamma_markets(http, condition_ids):
-    """Map condition_id -> (outcomePrices, outcomes, closed) from Gamma."""
-    out = {}
-    BATCH = 20
-    ids = list(condition_ids)
-    for i in range(0, len(ids), BATCH):
-        batch = ids[i:i + BATCH]
-        try:
-            r = await http.get(f"{GAMMA}/markets", params=[
-                ("limit", "100"), *[("condition_ids", c) for c in batch]
-            ])
-            if r.status_code != 200:
-                continue
-            for m in r.json():
-                cid = m.get("conditionId") or m.get("condition_id")
-                if not cid:
-                    continue
-                raw = m.get("outcomePrices")
-                if isinstance(raw, str):
-                    try: raw = json.loads(raw)
-                    except Exception: raw = None
-                names = m.get("outcomes")
-                if isinstance(names, str):
-                    try: names = json.loads(names)
-                    except Exception: names = None
-                out[cid] = (raw, names, m.get("closed"))
-        except Exception:
-            continue
-        await asyncio.sleep(0.15)
-    return out
+        pass
+    cache[condition_id] = result
+    return result
 
 
 async def main():
@@ -84,11 +63,7 @@ async def main():
 
     cids = {t.condition_id for t in paper}
     print(f"\nRe-resolving {len(paper)} paper trades across "
-          f"{len(cids)} unique markets via Gamma...\n")
-
-    proxy = settings.proxy_url or None
-    async with httpx.AsyncClient(timeout=30, proxy=proxy) as http:
-        markets = await fetch_gamma_markets(http, cids)
+          f"{len(cids)} unique markets via CLOB ground truth...\n")
 
     n_res = wins = losses = 0
     true_pnl = 0.0
@@ -97,38 +72,35 @@ async def main():
     buckets = {(0.0, 0.10): [0, 0.0, 0.0], (0.10, 0.20): [0, 0.0, 0.0],
                (0.20, 0.35): [0, 0.0, 0.0], (0.35, 1.01): [0, 0.0, 0.0]}
     unresolved = 0
-    flipped = 0   # trades whose correct result differs from what was recorded
+    flipped = 0   # recorded as a win but actually a loss
 
-    for t in paper:
-        info = markets.get(t.condition_id)
-        if not info:
-            unresolved += 1
-            continue
-        op, names, closed = info
-        win_idx = winning_index(op) if op else None
-        if win_idx is None:
-            unresolved += 1
-            continue
+    proxy = settings.proxy_url or None
+    cache = {}
+    async with httpx.AsyncClient(timeout=30, proxy=proxy) as http:
+        for t in paper:
+            yes_won, closed = await fetch_clob_market(http, t.condition_id, cache)
+            if yes_won is None or not closed:
+                unresolved += 1
+                continue
+            if not t.price or t.price <= 0:
+                continue
 
-        bot_idx = 0 if t.side == "YES" else 1
-        won = (bot_idx == win_idx)
-        if not t.price or t.price <= 0:
-            continue
-        pnl = (t.amount_usdc / t.price - t.amount_usdc) if won else -t.amount_usdc
+            won = (t.side == "YES" and yes_won) or (t.side == "NO" and not yes_won)
+            pnl = (t.amount_usdc / t.price - t.amount_usdc) if won else -t.amount_usdc
 
-        n_res += 1
-        staked += t.amount_usdc
-        true_pnl += pnl
-        recorded_pnl += (t.pnl or 0.0)
-        wins += 1 if won else 0
-        losses += 0 if won else 1
-        if (t.pnl or 0) > 0 and not won:
-            flipped += 1   # was recorded win, actually a loss
+            n_res += 1
+            staked += t.amount_usdc
+            true_pnl += pnl
+            recorded_pnl += (t.pnl or 0.0)
+            wins += 1 if won else 0
+            losses += 0 if won else 1
+            if (t.pnl or 0) > 0 and not won:
+                flipped += 1
 
-        for (lo, hi), agg in buckets.items():
-            if lo <= t.price < hi:
-                agg[0] += 1; agg[1] += pnl; agg[2] += t.amount_usdc
-                break
+            for (lo, hi), agg in buckets.items():
+                if lo <= t.price < hi:
+                    agg[0] += 1; agg[1] += pnl; agg[2] += t.amount_usdc
+                    break
 
     print("=== REAL paper P&L (Polymarket ground truth) ===\n")
     print(f"Resolved trades : {n_res}   (unresolved/not found: {unresolved})")
