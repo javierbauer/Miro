@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     polymarket_api_key: Optional[str] = None
     polymarket_api_secret: Optional[str] = None
     polymarket_api_passphrase: Optional[str] = None
+    # If your Polymarket account uses a proxy wallet (POLY_PROXY, type-1),
+    # set this to the proxy address shown on your profile page (0x...).
+    # Leave unset to let the SDK derive the deposit wallet (type-3) automatically.
+    polymarket_proxy_wallet: Optional[str] = None
 
     # Trading config
     max_bet_usdc: float = 10.0

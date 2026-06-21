@@ -144,11 +144,14 @@ class Trader:
                 os.environ["HTTPS_PROXY"] = proxy
                 os.environ["HTTP_PROXY"] = proxy
 
-            # Credentials are for the deposit wallet (bootstrapped via L2 auth).
-            # wallet=None lets SDK derive the deposit wallet from the private key.
             from polymarket import ApiKeyCreds
+            # If the account was set up via the Polymarket web UI it uses a
+            # type-1 POLY_PROXY wallet.  Pass the proxy address explicitly so
+            # the SDK signs orders as that maker; omit (None) to fall back to
+            # the type-3 deposit-wallet flow for bot-only accounts.
             client = await AsyncSecureClient._create(
                 private_key=settings.polymarket_private_key,
+                wallet=settings.polymarket_proxy_wallet or None,
                 credentials=ApiKeyCreds(
                     key=settings.polymarket_api_key,
                     passphrase=settings.polymarket_api_passphrase,
@@ -156,6 +159,7 @@ class Trader:
                 ),
                 validate_credentials=False,
             )
+            logger.info(f"[LIVE] SDK wallet: {client._ctx.wallet}")
             try:
                 # side is always "BUY" — we buy YES tokens or NO tokens
                 resp = await client.place_market_order(
