@@ -222,29 +222,48 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
 
 
 @app.get("/api/live_balance")
-async def get_live_pnl(session: AsyncSession = Depends(get_session)):
-    """Return P&L summary for real (non-paper) trades."""
-    result = await session.execute(
-        select(Trade).where(
-            Trade.status == "RESOLVED",
-            ~Trade.order_id.like("PAPER-%"),
-        )
+async def get_live_balance(session: AsyncSession = Depends(get_session)):
+    """Rich live P&L snapshot: CLOB cash + open positions + resolved P&L."""
+    # Open live trades (real money at stake, markets not yet resolved)
+    open_result = await session.execute(
+        select(Trade).where(Trade.status.in_(["FILLED", "PENDING"]))
     )
-    trades = result.scalars().all()
-    if not trades:
-        return {"balance": 0.0, "resolved": 0, "wins": 0, "losses": 0,
-                "roi_pct": 0.0, "mode": "live"}
-    wins   = sum(1 for t in trades if t.pnl and t.pnl > 0)
-    losses = sum(1 for t in trades if t.pnl and t.pnl <= 0)
-    total_pnl    = sum(t.pnl for t in trades if t.pnl)
-    total_staked = sum(t.amount_usdc for t in trades)
+    open_trades = [t for t in open_result.scalars().all()
+                   if t.order_id and not t.order_id.startswith("PAPER-")]
+
+    # Resolved live trades (P&L already computed)
+    resolved_result = await session.execute(
+        select(Trade).where(Trade.status == "RESOLVED")
+    )
+    resolved_trades = [t for t in resolved_result.scalars().all()
+                       if t.order_id and not t.order_id.startswith("PAPER-")]
+
+    # CLOB cash balance — reuses scanner.trader's 60s cache, so the
+    # dashboard's 30s poll never hits the CLOB more than once per minute.
+    clob_balance: Optional[float] = None
+    if not settings.dry_run:
+        try:
+            clob_balance = await scanner.trader.live_bankroll()
+        except Exception:
+            pass
+
+    wins            = sum(1 for t in resolved_trades if t.pnl and t.pnl > 0)
+    losses          = sum(1 for t in resolved_trades if t.pnl and t.pnl <= 0)
+    resolved_pnl    = round(sum(t.pnl for t in resolved_trades if t.pnl), 2)
+    resolved_staked = sum(t.amount_usdc for t in resolved_trades)
+    open_staked     = round(sum(t.amount_usdc for t in open_trades), 2)
+
     return {
-        "balance":  round(total_pnl, 2),
-        "resolved": len(trades),
-        "wins":     wins,
-        "losses":   losses,
-        "roi_pct":  round(total_pnl / total_staked * 100, 2) if total_staked else 0,
-        "mode":     "live",
+        "clob_balance":   clob_balance,
+        "open_count":     len(open_trades),
+        "open_staked":    open_staked,
+        "resolved":       len(resolved_trades),
+        "wins":           wins,
+        "losses":         losses,
+        "resolved_pnl":   resolved_pnl,
+        "total_invested": round(resolved_staked + open_staked, 2),
+        "roi_pct":        round(resolved_pnl / resolved_staked * 100, 2) if resolved_staked else 0,
+        "mode":           "live",
     }
 
 

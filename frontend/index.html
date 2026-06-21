@@ -281,10 +281,60 @@
     <span class="last-update ml-auto" id="scan-count"></span>
   </div>
 
-  <!-- P&L Results Panel -->
+  <!-- Live Trading Panel -->
+  <div class="panel" style="margin-bottom:24px" id="live-panel">
+    <div class="panel-header">
+      &#128178; Live Trading
+    </div>
+    <div style="padding:16px">
+      <div class="pnl-grid" style="margin-bottom:0">
+        <div class="pnl-card">
+          <div class="value" id="live-balance" style="color:var(--green)">–</div>
+          <div class="label">Saldo CLOB</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-open-staked" style="color:var(--orange)">–</div>
+          <div class="label">Apostado Abierto</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-open-count" style="color:var(--blue)">–</div>
+          <div class="label">Posiciones Abiertas</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-total-invested" style="color:var(--muted)">–</div>
+          <div class="label">Total Invertido</div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);margin:14px 0"></div>
+      <div class="pnl-grid" style="margin-bottom:0">
+        <div class="pnl-card">
+          <div class="value" id="live-pnl" style="color:var(--green)">–</div>
+          <div class="label">P&amp;L Resuelto</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-wins" style="color:var(--green)">–</div>
+          <div class="label">Ganadas</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-losses" style="color:var(--red)">–</div>
+          <div class="label">Perdidas</div>
+        </div>
+        <div class="pnl-card">
+          <div class="value" id="live-roi" style="color:var(--purple)">–</div>
+          <div class="label">ROI Resuelto</div>
+        </div>
+      </div>
+      <p id="live-pending-note" style="display:none;font-size:0.75rem;color:var(--muted);margin-top:12px;text-align:center">
+        &#9203; Posiciones abiertas pendientes de resolución — el P&amp;L se actualiza cuando el mercado cierra.
+        Usa <strong>Check Resolutions</strong> para forzar la comprobación.
+      </p>
+    </div>
+  </div>
+
+  <!-- P&L Results Panel (paper + live resolved) -->
   <div class="panel" style="margin-bottom:24px">
     <div class="panel-header" style="justify-content:space-between">
-      <span>&#128200; Actual P&amp;L (Resolved Trades)</span>
+      <span>&#128200; P&amp;L Resuelto (Todos los Trades)</span>
       <button class="btn-blue" onclick="updatePnl()" style="padding:4px 12px;font-size:0.78rem">&#8635; Check Resolutions</button>
     </div>
     <div class="pnl-grid" style="padding:16px" id="pnl-grid">
@@ -428,16 +478,11 @@ async function loadStatus() {
     balLbl.textContent = 'Paper Balance';
     balEl.textContent = `$${s.paper_balance?.toFixed(0) ?? '—'}`;
   } else {
+    // Live balance shown in dedicated panel; stat card shows CLOB cash
     balEl.style.color = 'var(--green)';
-    balLbl.textContent = 'Live Balance';
-    apiFetch('/api/live_balance').then(b => {
-      if (!b) return;
-      const pnl = b.balance ?? 0;
-      const sign = pnl >= 0 ? '+' : '';
-      balEl.textContent = `${sign}$${pnl.toFixed(2)}`;
-      balEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
-      balLbl.textContent = `Live P&L (${b.resolved} resolved)`;
-    });
+    balLbl.textContent = 'Saldo CLOB';
+    const liveEl = document.getElementById('live-balance');
+    balEl.textContent = liveEl?.textContent ?? '—';
   }
   document.getElementById('last-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
 }
@@ -549,8 +594,46 @@ async function updatePnl() {
   }
 }
 
+async function loadLiveBalance() {
+  const b = await apiFetch('/api/live_balance');
+  if (!b) return;
+
+  // CLOB cash
+  const balEl = document.getElementById('live-balance');
+  if (b.clob_balance != null) {
+    balEl.textContent = `$${b.clob_balance.toFixed(2)}`;
+    balEl.style.color = 'var(--green)';
+  } else {
+    balEl.textContent = '–';
+    balEl.title = 'Solo visible en modo LIVE';
+  }
+
+  // Open positions
+  document.getElementById('live-open-staked').textContent = `$${(b.open_staked || 0).toFixed(2)}`;
+  document.getElementById('live-open-count').textContent  = b.open_count || 0;
+  document.getElementById('live-total-invested').textContent = `$${(b.total_invested || 0).toFixed(2)}`;
+
+  // Resolved P&L
+  const pnl = b.resolved_pnl || 0;
+  const pnlEl = document.getElementById('live-pnl');
+  pnlEl.textContent  = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
+  pnlEl.style.color  = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+  document.getElementById('live-wins').textContent   = b.wins   || 0;
+  document.getElementById('live-losses').textContent = b.losses || 0;
+
+  const roi = b.roi_pct || 0;
+  const roiEl = document.getElementById('live-roi');
+  roiEl.textContent = (roi >= 0 ? '+' : '') + roi.toFixed(1) + '%';
+  roiEl.style.color = roi >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Note when there are open positions waiting to resolve
+  document.getElementById('live-pending-note').style.display =
+    (b.open_count || 0) > 0 ? 'block' : 'none';
+}
+
 async function refresh() {
-  await Promise.all([loadStatus(), loadStats(), loadPredictions(), loadTrades(), loadMarkets(), loadPnl()]);
+  await Promise.all([loadLiveBalance(), loadStatus(), loadStats(), loadPredictions(), loadTrades(), loadMarkets(), loadPnl()]);
 }
 
 async function triggerScan() {
