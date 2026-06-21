@@ -137,10 +137,15 @@ class Trader:
                 logger.error(f"Token ID missing for side={side}")
                 return None
 
-            # Route py-clob-client through proxy if configured
+            # Inject proxy into py-clob-client's shared httpx client
+            # (it uses a module-level singleton created at import time)
             if settings.proxy_url:
-                import os
-                os.environ["HTTPS_PROXY"] = settings.proxy_url
+                import httpx as _httpx
+                from py_clob_client.http_helpers import helpers as _clob_helpers
+                _clob_helpers._http_client = _httpx.Client(
+                    http2=True,
+                    proxy=settings.proxy_url,
+                )
 
             creds = ApiCreds(
                 api_key=settings.polymarket_api_key,
