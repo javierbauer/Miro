@@ -228,6 +228,52 @@
     }
     .refreshing { opacity: 0.6; }
     .last-update { font-size: 0.72rem; color: var(--muted); margin-left: auto; }
+
+    /* ── Claude Analysis Panel ── */
+    .claude-step {
+      background: #010409;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    .claude-step-label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--blue);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .claude-textarea {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: "JetBrains Mono", "Fira Code", monospace;
+      font-size: 0.75rem;
+      padding: 10px 12px;
+      resize: vertical;
+      line-height: 1.5;
+      outline: none;
+    }
+    .claude-textarea:focus { border-color: var(--blue); }
+    .apply-result-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(48,54,61,0.4);
+      font-size: 0.8rem;
+    }
+    .apply-result-row:last-child { border-bottom: none; }
+    .badge-trade  { background:rgba(63,185,80,0.2);  color:var(--green);  padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; }
+    .badge-skip   { background:rgba(139,148,158,0.15);color:var(--muted); padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; }
+    .badge-error  { background:rgba(248,81,73,0.2);  color:var(--red);   padding:2px 7px; border-radius:4px; font-size:0.72rem; font-weight:700; }
   </style>
 </head>
 <body>
@@ -279,6 +325,22 @@
     <button class="btn-blue"  onclick="triggerScan()">&#8635; Run Scan Now</button>
     <button class="btn-muted" onclick="refresh()">&#8634; Refresh</button>
     <span class="last-update ml-auto" id="scan-count"></span>
+  </div>
+
+  <!-- Claude Analysis Panel -->
+  <div class="panel" style="margin-bottom:24px">
+    <div class="panel-header" style="justify-content:space-between">
+      <span>&#129302; An&aacute;lisis con Claude</span>
+      <button class="btn-blue" id="btn-analyze" onclick="fetchCandidates()">
+        &#128269; Analizar Mercados
+      </button>
+    </div>
+    <div style="padding:16px" id="claude-panel-body">
+      <p style="color:var(--muted);text-align:center;padding:24px 0;font-size:0.875rem">
+        Haz clic en <strong>Analizar Mercados</strong> para obtener los candidatos actuales,
+        p&eacute;galos en Claude y recibe recomendaciones de trading con IA real.
+      </p>
+    </div>
   </div>
 
   <!-- Live Trading Panel -->
@@ -671,6 +733,186 @@ function startAutoRefresh() {
 
 function stopAutoRefresh() {
   if (autoRefresh) { clearInterval(autoRefresh); autoRefresh = null; }
+}
+
+// ── Claude Analysis ─────────────────────────────────────
+let _candidates = [];
+
+async function fetchCandidates() {
+  const btn = document.getElementById('btn-analyze');
+  const body = document.getElementById('claude-panel-body');
+  btn.textContent = '⏳ Obteniendo mercados...';
+  btn.disabled = true;
+  body.innerHTML = '<p style="color:var(--muted);text-align:center;padding:24px">Consultando Polymarket...</p>';
+
+  const data = await apiFetch('/api/candidates');
+  btn.textContent = '🔍 Analizar Mercados';
+  btn.disabled = false;
+
+  if (!data) return;
+  if (data.length === 0) {
+    body.innerHTML = '<p style="color:var(--muted);text-align:center;padding:24px">No hay candidatos ahora mismo (mercados sin resolución próxima o muy eficientes). Intenta en unos minutos.</p>';
+    return;
+  }
+
+  _candidates = data;
+  const n = data.length;
+  const jsonStr = JSON.stringify(data, null, 2);
+
+  const fullPrompt = `Eres un experto en mercados de predicción binaria. Analiza los siguientes ${n} mercados de Polymarket y estima la probabilidad real de que YES resuelva para cada uno.
+
+${jsonStr}
+
+Reglas:
+- Si no tienes información confiable, devuelve la probabilidad del mercado (sin edge)
+- Considera noticias recientes, base rates, criterios de resolución y tiempo restante
+- Responde SOLO con un JSON array, sin texto adicional ni bloques de código markdown
+
+Formato exacto:
+[
+  {"condition_id":"0x...","action":"BUY_YES","prob":0.55,"confidence":"high","reasoning":"Una frase explicando tu estimación"},
+  {"condition_id":"0x...","action":"SKIP","prob":0.30,"reasoning":"El precio del mercado ya es justo"}
+]
+
+action puede ser: BUY_YES (apostar YES), BUY_NO (apostar NO), SKIP (sin edge suficiente)`;
+
+  body.innerHTML = `
+    <div class="claude-step">
+      <div class="claude-step-label">
+        <span>📋 Paso 1 — Copia esto y pégalo en Claude</span>
+        <button class="btn-blue" onclick="copyPrompt()" style="padding:4px 12px;font-size:0.72rem" id="copy-btn">
+          Copiar (${n} mercados)
+        </button>
+      </div>
+      <textarea class="claude-textarea" id="candidates-ta" readonly style="height:160px">${escHtml(fullPrompt)}</textarea>
+    </div>
+
+    <div class="claude-step">
+      <div class="claude-step-label">
+        <span>✉️ Paso 2 — Pega aquí la respuesta de Claude</span>
+      </div>
+      <textarea class="claude-textarea" id="claude-response-ta" style="height:180px"
+        placeholder='[&#10;  {"condition_id":"0x...","action":"BUY_YES","prob":0.55,"confidence":"high","reasoning":"..."},&#10;  ...&#10;]'></textarea>
+      <div style="margin-top:10px;display:flex;align-items:center;gap:10px">
+        <button class="btn-green" onclick="applyRecs()" id="btn-apply">
+          ✅ Ejecutar Trades
+        </button>
+        <span style="font-size:0.78rem;color:var(--muted)" id="apply-status"></span>
+      </div>
+    </div>
+
+    <div id="apply-results"></div>
+  `;
+  log(`${n} candidatos listos — copia el texto del Paso 1 y pégalo en Claude`, 'info');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function copyPrompt() {
+  const ta = document.getElementById('candidates-ta');
+  if (!ta) return;
+  try {
+    await navigator.clipboard.writeText(ta.value);
+    const btn = document.getElementById('copy-btn');
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copiado!';
+    setTimeout(() => btn.textContent = orig, 2000);
+  } catch(e) {
+    ta.select();
+    document.execCommand('copy');
+  }
+}
+
+async function applyRecs() {
+  const ta = document.getElementById('claude-response-ta');
+  const statusEl = document.getElementById('apply-status');
+  const resultsEl = document.getElementById('apply-results');
+  const btn = document.getElementById('btn-apply');
+
+  if (!ta || !ta.value.trim()) {
+    statusEl.textContent = '⚠️ Pega la respuesta de Claude primero';
+    statusEl.style.color = 'var(--yellow)';
+    return;
+  }
+
+  let recs;
+  try {
+    let raw = ta.value.trim();
+    // Strip markdown code fences if Claude added them
+    const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (match) raw = match[1].trim();
+    recs = JSON.parse(raw);
+  } catch(e) {
+    statusEl.textContent = '❌ JSON inválido: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ Ejecutando...';
+  statusEl.textContent = '';
+
+  try {
+    const resp = await fetch('/api/apply_recommendations', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(recs),
+    });
+    const result = await resp.json();
+
+    btn.disabled = false;
+    btn.textContent = '✅ Ejecutar Trades';
+
+    const summary = `${result.applied} trades | ${result.skipped} omitidos | ${result.errors} errores`;
+    statusEl.textContent = summary;
+    statusEl.style.color = result.applied > 0 ? 'var(--green)' : 'var(--muted)';
+
+    // Render detailed results
+    const rows = [
+      ...(result.trades || []).map(t =>
+        `<div class="apply-result-row">
+          <span class="badge-trade">TRADE</span>
+          <span style="color:${t.side==='YES'?'var(--green)':'var(--red)'};font-weight:700">${t.side}</span>
+          <span>$${t.amount.toFixed(2)} @ ${(t.price*100).toFixed(1)}¢</span>
+          <span style="color:var(--muted)">edge ${t.edge>=0?'+':''}${(t.edge*100).toFixed(1)}%</span>
+          <span style="color:var(--text);margin-left:4px">${t.question.substring(0,60)}</span>
+        </div>`),
+      ...(result.skipped_list || []).map(s =>
+        `<div class="apply-result-row">
+          <span class="badge-skip">SKIP</span>
+          <span style="color:var(--muted)">${s.question.substring(0,60)}</span>
+          <span style="color:var(--muted);font-size:0.75rem">— ${s.reason}</span>
+        </div>`),
+      ...(result.error_list || []).map(e =>
+        `<div class="apply-result-row">
+          <span class="badge-error">ERR</span>
+          <span style="color:var(--red)">${e.question.substring(0,50)}</span>
+          <span style="color:var(--muted);font-size:0.75rem">— ${e.error}</span>
+        </div>`),
+    ];
+
+    if (rows.length) {
+      resultsEl.innerHTML = `
+        <div style="border-top:1px solid var(--border);margin-top:12px;padding-top:12px">
+          <div style="font-size:0.78rem;font-weight:700;color:var(--muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.06em">
+            Resultado — ${result.mode}
+          </div>
+          ${rows.join('')}
+        </div>`;
+    }
+
+    if (result.applied > 0) {
+      log(`${result.applied} trades ejecutados desde recomendación de Claude`, 'info');
+      setTimeout(refresh, 1500);
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '✅ Ejecutar Trades';
+    statusEl.textContent = '❌ Error: ' + e.message;
+    statusEl.style.color = 'var(--red)';
+  }
 }
 
 // Init

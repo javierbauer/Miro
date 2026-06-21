@@ -5,7 +5,8 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Depends, BackgroundTasks, Query
+from fastapi import FastAPI, Depends, BackgroundTasks, Query, Request
+import httpx as _httpx
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -264,6 +265,150 @@ async def get_live_balance(session: AsyncSession = Depends(get_session)):
         "total_invested": round(resolved_staked + open_staked, 2),
         "roi_pct":        round(resolved_pnl / resolved_staked * 100, 2) if resolved_staked else 0,
         "mode":           "live",
+    }
+
+
+@app.get("/api/candidates")
+async def get_candidates():
+    """Fetch and filter market candidates for Claude analysis."""
+    from datetime import timezone
+    client = PolymarketClient()
+    try:
+        markets = await client.get_top_markets(n=60)
+    finally:
+        await client.close()
+
+    MIN_LIQ, MIN_VOL, MAX_VOL = 500.0, 100.0, 5_000_000.0
+    MIN_P, MAX_P, MIN_D, MAX_D = 0.05, 0.95, 0.1, 7.0
+
+    candidates = []
+    for m in markets:
+        yes_price = m.get("_yes_price", 0.5)
+        no_price  = m.get("_no_price", round(1 - yes_price, 4))
+        liquidity = float(m.get("liquidity") or 0)
+        volume    = float(m.get("volume24hr") or m.get("volume") or 0)
+
+        end_str = m.get("endDate") or m.get("end_date_iso")
+        d = None
+        if end_str:
+            try:
+                end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+                d = (end - datetime.now(timezone.utc)).total_seconds() / 86400
+            except Exception:
+                pass
+
+        if liquidity < MIN_LIQ: continue
+        if not (MIN_VOL <= volume <= MAX_VOL): continue
+        if not (MIN_P < yes_price < MAX_P): continue
+        if d is None or not (MIN_D < d <= MAX_D): continue
+
+        candidates.append({
+            "condition_id": m.get("conditionId") or m.get("condition_id", ""),
+            "question":     m.get("question", ""),
+            "description":  (m.get("description") or "")[:300].strip(),
+            "category":     m.get("category") or "",
+            "yes_price":    round(yes_price, 4),
+            "no_price":     round(no_price, 4),
+            "volume_24h":   int(volume),
+            "liquidity":    int(liquidity),
+            "days_left":    round(d, 2),
+        })
+
+    return candidates
+
+
+@app.post("/api/apply_recommendations")
+async def apply_recommendations(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Execute trades based on Claude's JSON recommendations."""
+    from backend.predictor import PredictionResult
+
+    try:
+        recs = await request.json()
+    except Exception as e:
+        return {"error": f"Invalid JSON: {e}", "applied": 0, "skipped": 0, "errors": 0}
+
+    if not isinstance(recs, list):
+        return {"error": "Expected a JSON array", "applied": 0, "skipped": 0, "errors": 0}
+
+    MIN_EDGE    = 0.05
+    CONF_WEIGHT = {"high": 1.0, "medium": 0.80, "low": 0.55}
+    proxy       = settings.proxy_url or None
+    trader      = scanner.trader
+    applied     = []
+    skipped     = []
+    errors      = []
+
+    async with _httpx.AsyncClient(timeout=15, proxy=proxy) as http:
+        for rec in recs:
+            if not isinstance(rec, dict):
+                continue
+            cid    = str(rec.get("condition_id") or "")
+            action = str(rec.get("action") or "SKIP").upper()
+            prob   = float(rec.get("prob") or rec.get("probability") or 0)
+            conf   = str(rec.get("confidence") or "medium").lower()
+            reason = str(rec.get("reasoning") or "Claude recommendation")
+            label  = str(rec.get("question") or cid[:30])
+
+            if "SKIP" in action or not cid:
+                skipped.append({"question": label, "reason": reason})
+                continue
+
+            # Fetch live YES price from CLOB
+            try:
+                r = await http.get(f"{settings.clob_host}/markets/{cid}")
+                if r.status_code != 200:
+                    errors.append({"question": label, "error": f"CLOB {r.status_code}"})
+                    continue
+                tokens = r.json().get("tokens", [])
+                if not tokens or not isinstance(tokens[0], dict):
+                    errors.append({"question": label, "error": "no tokens"}); continue
+                tid = tokens[0].get("token_id")
+                if not tid:
+                    errors.append({"question": label, "error": "no token_id"}); continue
+                r2 = await http.get(f"{settings.clob_host}/price",
+                                    params={"token_id": tid, "side": "buy"})
+                yes_price = float(r2.json().get("price", 0.5)) if r2.status_code == 200 else 0.5
+            except Exception as e:
+                errors.append({"question": label, "error": str(e)}); continue
+
+            if "NO" in action:
+                bet_side, bet_price = "NO", round(1 - yes_price, 4)
+                edge = (1 - prob) - bet_price
+            else:
+                bet_side, bet_price = "YES", yes_price
+                edge = prob - bet_price
+
+            if edge < MIN_EDGE:
+                skipped.append({"question": label,
+                                 "reason": f"edge {edge:+.3f} < {MIN_EDGE} (price moved?)"})
+                continue
+
+            conf_w     = CONF_WEIGHT.get(conf, 0.80)
+            kelly      = round(max(0.0, min(0.05, edge / (1 - bet_price) * 0.5)), 4)
+            confidence = round(min(1.0, edge / 0.15 * conf_w), 3)
+
+            pred = PredictionResult(
+                condition_id=cid, question=label[:200],
+                market_yes_price=yes_price, predicted_yes_prob=prob,
+                edge=edge, confidence=confidence,
+                signal=f"BUY_{bet_side}", kelly_fraction=kelly,
+                bet_side=bet_side, reasoning=f"Claude ({conf}): {reason}",
+            )
+            trade = await trader.maybe_trade(pred, session)
+            if trade:
+                applied.append({"question": label, "side": bet_side,
+                                 "amount": round(trade.amount_usdc, 2),
+                                 "price": bet_price, "edge": round(edge, 3)})
+            else:
+                skipped.append({"question": label, "reason": "budget exhausted"})
+
+    return {
+        "applied": len(applied), "skipped": len(skipped), "errors": len(errors),
+        "trades": applied, "skipped_list": skipped, "error_list": errors,
+        "mode": trader.mode_label,
     }
 
 
