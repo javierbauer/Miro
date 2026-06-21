@@ -144,10 +144,16 @@ class Trader:
                 os.environ["HTTPS_PROXY"] = proxy
                 os.environ["HTTP_PROXY"] = proxy
 
-            # Use L2 header auth (ECDSA per-request signing) — no API key needed.
-            # The deposit wallet flow authenticates via signature, not API key credentials.
+            # Credentials are for the deposit wallet (bootstrapped via L2 auth).
+            # wallet=None lets SDK derive the deposit wallet from the private key.
+            from polymarket import ApiKeyCreds
             client = await AsyncSecureClient._create(
                 private_key=settings.polymarket_private_key,
+                credentials=ApiKeyCreds(
+                    key=settings.polymarket_api_key,
+                    passphrase=settings.polymarket_api_passphrase,
+                    secret=settings.polymarket_api_secret,
+                ),
                 validate_credentials=False,
             )
             try:
