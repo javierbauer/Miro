@@ -272,47 +272,48 @@ async def get_live_balance(session: AsyncSession = Depends(get_session)):
 async def get_candidates():
     """Fetch and filter market candidates for Claude analysis."""
     from datetime import timezone
-    client = PolymarketClient()
     try:
-        markets = await client.get_top_markets(n=60)
-    finally:
-        await client.close()
+        # Reuse the scanner's already-open client — no extra connection overhead
+        markets = await scanner.client.get_top_markets(n=60)
+    except Exception as exc:
+        logger.error(f"get_candidates: market fetch failed: {exc}")
+        return []
 
     MIN_LIQ, MIN_VOL, MAX_VOL = 500.0, 100.0, 5_000_000.0
     MIN_P, MAX_P, MIN_D, MAX_D = 0.05, 0.95, 0.1, 7.0
 
     candidates = []
     for m in markets:
-        yes_price = m.get("_yes_price", 0.5)
-        no_price  = m.get("_no_price", round(1 - yes_price, 4))
-        liquidity = float(m.get("liquidity") or 0)
-        volume    = float(m.get("volume24hr") or m.get("volume") or 0)
+        try:
+            yes_price = m.get("_yes_price", 0.5)
+            no_price  = m.get("_no_price", round(1 - yes_price, 4))
+            liquidity = float(m.get("liquidity") or 0)
+            volume    = float(m.get("volume24hr") or m.get("volume") or 0)
 
-        end_str = m.get("endDate") or m.get("end_date_iso")
-        d = None
-        if end_str:
-            try:
+            end_str = m.get("endDate") or m.get("end_date_iso")
+            d = None
+            if end_str:
                 end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
                 d = (end - datetime.now(timezone.utc)).total_seconds() / 86400
-            except Exception:
-                pass
 
-        if liquidity < MIN_LIQ: continue
-        if not (MIN_VOL <= volume <= MAX_VOL): continue
-        if not (MIN_P < yes_price < MAX_P): continue
-        if d is None or not (MIN_D < d <= MAX_D): continue
+            if liquidity < MIN_LIQ: continue
+            if not (MIN_VOL <= volume <= MAX_VOL): continue
+            if not (MIN_P < yes_price < MAX_P): continue
+            if d is None or not (MIN_D < d <= MAX_D): continue
 
-        candidates.append({
-            "condition_id": m.get("conditionId") or m.get("condition_id", ""),
-            "question":     m.get("question", ""),
-            "description":  (m.get("description") or "")[:300].strip(),
-            "category":     m.get("category") or "",
-            "yes_price":    round(yes_price, 4),
-            "no_price":     round(no_price, 4),
-            "volume_24h":   int(volume),
-            "liquidity":    int(liquidity),
-            "days_left":    round(d, 2),
-        })
+            candidates.append({
+                "condition_id": m.get("conditionId") or m.get("condition_id", ""),
+                "question":     m.get("question", ""),
+                "description":  (m.get("description") or "")[:300].strip(),
+                "category":     m.get("category") or "",
+                "yes_price":    round(yes_price, 4),
+                "no_price":     round(no_price, 4),
+                "volume_24h":   int(volume),
+                "liquidity":    int(liquidity),
+                "days_left":    round(d, 2),
+            })
+        except Exception:
+            continue
 
     return candidates
 
