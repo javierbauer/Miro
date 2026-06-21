@@ -269,53 +269,88 @@ async def get_live_balance(session: AsyncSession = Depends(get_session)):
 
 
 @app.get("/api/candidates")
-async def get_candidates():
-    """Fetch and filter market candidates for Claude analysis."""
+async def get_candidates(limit: int = Query(default=30, ge=5, le=60)):
+    """Fetch and score market candidates by misprice likelihood for Claude analysis.
+
+    Scoring logic: markets are most likely mispriced when:
+      1. Price is near 50/50 (genuinely uncertain → harder to value)
+      2. Volume is low relative to liquidity (stale price, few active traders)
+    Returns up to `limit` candidates sorted by misprice_score descending.
+    """
     from datetime import timezone
+    import json as _json
+
+    # Fetch raw Gamma data — no CLOB enrichment so we can pull 200 quickly
     try:
-        # Reuse the scanner's already-open client — no extra connection overhead
-        markets = await scanner.client.get_top_markets(n=60)
+        raw_markets = await scanner.client.get_markets(limit=200, active=True)
     except Exception as exc:
-        logger.error(f"get_candidates: market fetch failed: {exc}")
+        logger.error(f"get_candidates: fetch failed: {exc}")
         return []
 
-    MIN_LIQ, MIN_VOL, MAX_VOL = 500.0, 100.0, 5_000_000.0
-    MIN_P, MAX_P, MIN_D, MAX_D = 0.05, 0.95, 0.1, 7.0
+    MIN_LIQ  = 500.0
+    MIN_P, MAX_P = 0.05, 0.95
+    MIN_DAYS, MAX_DAYS = 0.1, 30.0   # 30-day window — Claude can analyse these
 
-    candidates = []
-    for m in markets:
+    scored = []
+    for m in raw_markets:
         try:
-            yes_price = m.get("_yes_price", 0.5)
-            no_price  = m.get("_no_price", round(1 - yes_price, 4))
+            # Parse prices from Gamma outcomePrices (avoids per-market CLOB calls)
+            raw = m.get("outcomePrices")
+            if isinstance(raw, str):
+                raw = _json.loads(raw)
+            if not isinstance(raw, list) or len(raw) < 2:
+                continue
+            yes_price = float(raw[0])
+            no_price  = float(raw[1])
+
+            if not (MIN_P < yes_price < MAX_P):
+                continue
+
             liquidity = float(m.get("liquidity") or 0)
-            volume    = float(m.get("volume24hr") or m.get("volume") or 0)
+            if liquidity < MIN_LIQ:
+                continue
+
+            volume = float(m.get("volume24hr") or m.get("volume") or 0)
 
             end_str = m.get("endDate") or m.get("end_date_iso")
-            d = None
-            if end_str:
-                end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-                d = (end - datetime.now(timezone.utc)).total_seconds() / 86400
+            if not end_str:
+                continue
+            end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+            d = (end - datetime.now(timezone.utc)).total_seconds() / 86400
+            if not (MIN_DAYS < d <= MAX_DAYS):
+                continue
 
-            if liquidity < MIN_LIQ: continue
-            if not (MIN_VOL <= volume <= MAX_VOL): continue
-            if not (MIN_P < yes_price < MAX_P): continue
-            if d is None or not (MIN_D < d <= MAX_D): continue
+            # ── Misprice likelihood score ──────────────────────────────
+            # price_uncertainty: peaks at 1.0 when yes_price=0.5, 0 at extremes.
+            # A 50/50 market is genuinely uncertain and harder to price right.
+            price_uncertainty = 4 * yes_price * (1 - yes_price)
 
-            candidates.append({
-                "condition_id": m.get("conditionId") or m.get("condition_id", ""),
-                "question":     m.get("question", ""),
-                "description":  (m.get("description") or "")[:300].strip(),
-                "category":     m.get("category") or "",
-                "yes_price":    round(yes_price, 4),
-                "no_price":     round(no_price, 4),
-                "volume_24h":   int(volume),
-                "liquidity":    int(liquidity),
-                "days_left":    round(d, 2),
+            # efficiency: how actively is this market being traded?
+            # High turnover (vol >> liq) → many traders → price is probably fair.
+            # Low turnover (vol << liq)  → stale price  → more likely mispriced.
+            vol_liq_ratio = volume / max(liquidity, 1.0)
+            inefficiency  = max(0.0, 1.0 - min(1.0, vol_liq_ratio / 5.0))
+
+            misprice_score = round(price_uncertainty * (0.4 + 0.6 * inefficiency), 4)
+
+            scored.append({
+                "condition_id":   m.get("conditionId") or m.get("condition_id", ""),
+                "question":       m.get("question", ""),
+                "description":    (m.get("description") or "")[:300].strip(),
+                "category":       m.get("category") or "",
+                "yes_price":      round(yes_price, 4),
+                "no_price":       round(no_price, 4),
+                "volume_24h":     int(volume),
+                "liquidity":      int(liquidity),
+                "days_left":      round(d, 2),
+                "misprice_score": misprice_score,
             })
         except Exception:
             continue
 
-    return candidates
+    # Best candidates first; cap at requested limit
+    scored.sort(key=lambda x: x["misprice_score"], reverse=True)
+    return scored[:limit]
 
 
 @app.post("/api/apply_recommendations")

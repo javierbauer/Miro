@@ -759,22 +759,28 @@ async function fetchCandidates() {
   const n = data.length;
   const jsonStr = JSON.stringify(data, null, 2);
 
-  const fullPrompt = `Eres un experto en mercados de predicción binaria. Analiza los siguientes ${n} mercados de Polymarket y estima la probabilidad real de que YES resuelva para cada uno.
+  const fullPrompt = `Eres un experto en mercados de predicción binaria. Analiza los siguientes ${n} mercados de Polymarket y determina en cuáles hay edge real de trading.
+
+Contexto del campo "misprice_score" (0-1): señal heurística de qué tan probable es que el mercado esté mal valorado. Score alto = precio incierto + pocos traders activos = más probable tener edge. Úsalo como guía de prioridad, no como verdad absoluta.
 
 ${jsonStr}
 
-Reglas:
-- Si no tienes información confiable, devuelve la probabilidad del mercado (sin edge)
-- Considera noticias recientes, base rates, criterios de resolución y tiempo restante
+Para cada mercado, estima la probabilidad REAL de que YES resuelva usando tu conocimiento.
+
+Reglas importantes:
+- Si el mercado trata sobre eventos muy recientes que no conoces, di SKIP con reasoning claro
+- Si el precio del mercado ya parece correcto basado en tu conocimiento, di SKIP
+- Solo di BUY_YES o BUY_NO cuando genuinamente creas que el mercado está equivocado
+- Prioriza mercados con misprice_score alto — es más probable que tengan edge
 - Responde SOLO con un JSON array, sin texto adicional ni bloques de código markdown
 
-Formato exacto:
+Formato exacto (devuelve TODOS los mercados, incluyendo los que son SKIP):
 [
-  {"condition_id":"0x...","action":"BUY_YES","prob":0.55,"confidence":"high","reasoning":"Una frase explicando tu estimación"},
-  {"condition_id":"0x...","action":"SKIP","prob":0.30,"reasoning":"El precio del mercado ya es justo"}
+  {"condition_id":"0x...","action":"BUY_YES","prob":0.65,"confidence":"high","reasoning":"Una frase concisa"},
+  {"condition_id":"0x...","action":"SKIP","prob":0.30,"reasoning":"Precio justo dado lo que sé"}
 ]
 
-action puede ser: BUY_YES (apostar YES), BUY_NO (apostar NO), SKIP (sin edge suficiente)`;
+action: BUY_YES (apostar que sí ocurre), BUY_NO (apostar que no ocurre), SKIP (sin edge o sin información suficiente)`;
 
   body.innerHTML = `
     <div class="claude-step">
