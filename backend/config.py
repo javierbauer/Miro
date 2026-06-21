@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # AI predictor
     anthropic_api_key: Optional[str] = None   # set to enable Claude-powered predictions
 
+    # Take profit — close position when value reaches this multiple of entry (0 = disabled)
+    take_profit_multiplier: float = 2.0
+
     # Proxy for CLOB API (needed if VPS is in US or other blocked region)
     proxy_url: Optional[str] = None  # e.g. socks5://user:pass@host:port
     clob_host: str = "https://clob.polymarket.com"
