@@ -759,28 +759,33 @@ async function fetchCandidates() {
   const n = data.length;
   const jsonStr = JSON.stringify(data, null, 2);
 
-  const fullPrompt = `Eres un experto en mercados de predicción binaria. Analiza los siguientes ${n} mercados de Polymarket y determina en cuáles hay edge real de trading.
+  const fullPrompt = `Eres un experto en mercados de predicción binaria. Analiza los siguientes ${n} mercados de Polymarket.
 
-Contexto del campo "misprice_score" (0-1): señal heurística de qué tan probable es que el mercado esté mal valorado. Score alto = precio incierto + pocos traders activos = más probable tener edge. Úsalo como guía de prioridad, no como verdad absoluta.
+El campo "misprice_score" (0-1) indica qué tan probable es que el precio esté mal: alto = precio incierto + pocos traders activos. Prioriza estos al analizar.
 
 ${jsonStr}
 
-Para cada mercado, estima la probabilidad REAL de que YES resuelva usando tu conocimiento.
+INSTRUCCIONES:
+Para cada mercado da tu mejor estimación de probabilidad. Usa estas reglas:
 
-Reglas importantes:
-- Si el mercado trata sobre eventos muy recientes que no conoces, di SKIP con reasoning claro
-- Si el precio del mercado ya parece correcto basado en tu conocimiento, di SKIP
-- Solo di BUY_YES o BUY_NO cuando genuinamente creas que el mercado está equivocado
-- Prioriza mercados con misprice_score alto — es más probable que tengan edge
-- Responde SOLO con un JSON array, sin texto adicional ni bloques de código markdown
+1. Si conoces el tema y el precio parece INCORRECTO → BUY_YES o BUY_NO con confidence "high" o "medium"
+2. Si conoces el tema pero el precio parece RAZONABLE → SKIP
+3. Si el tema es sobre eventos recientes que no conoces con certeza → da tu MEJOR ESTIMACIÓN con confidence "low" (NO digas SKIP solo por incertidumbre — una estimación con baja confianza sigue siendo útil)
+4. Si el tema es completamente desconocido para ti → SKIP
 
-Formato exacto (devuelve TODOS los mercados, incluyendo los que son SKIP):
+Ejemplos de cuándo NO hacer SKIP:
+- Sabes que una empresa tiene fundamentos sólidos aunque no conozcas su precio exacto hoy
+- Puedes razonar desde base rates históricos aunque no sepas el resultado específico
+- Conoces el contexto general aunque no el evento exacto
+
+Responde SOLO con JSON array (sin texto, sin markdown):
 [
-  {"condition_id":"0x...","action":"BUY_YES","prob":0.65,"confidence":"high","reasoning":"Una frase concisa"},
-  {"condition_id":"0x...","action":"SKIP","prob":0.30,"reasoning":"Precio justo dado lo que sé"}
+  {"condition_id":"0x...","action":"BUY_YES","prob":0.68,"confidence":"high","reasoning":"Una frase"},
+  {"condition_id":"0x...","action":"BUY_NO","prob":0.35,"confidence":"low","reasoning":"Base rate sugiere menos probable aunque no tengo datos recientes"},
+  {"condition_id":"0x...","action":"SKIP","reasoning":"Evento deportivo específico del que no tengo información"}
 ]
 
-action: BUY_YES (apostar que sí ocurre), BUY_NO (apostar que no ocurre), SKIP (sin edge o sin información suficiente)`;
+action: BUY_YES · BUY_NO · SKIP`;
 
   body.innerHTML = `
     <div class="claude-step">

@@ -269,7 +269,7 @@ async def get_live_balance(session: AsyncSession = Depends(get_session)):
 
 
 @app.get("/api/candidates")
-async def get_candidates(limit: int = Query(default=30, ge=5, le=60)):
+async def get_candidates(limit: int = Query(default=50, ge=5, le=100)):
     """Fetch and score market candidates by misprice likelihood for Claude analysis.
 
     Scoring logic: markets are most likely mispriced when:
